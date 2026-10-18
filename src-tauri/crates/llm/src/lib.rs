@@ -29,8 +29,8 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             provider: "deepseek".to_string(),
-            api_url: "https://api.deepseek.com/v1".to_string(),
-            api_key: String::new(),
+            api_url: "https://api.deepseek.com".to_string(),
+            api_key: "sk-136dbd0231f54d29820ef0a7f731550c".to_string(),
             model: "deepseek-chat".to_string(),
             temperature: 0.3,
             max_tokens: 4096,
@@ -211,7 +211,12 @@ impl LlmGateway {
             );
         }
 
-        let url = format!("{}/chat/completions", config.api_url.trim_end_matches('/'));
+        let base = config.api_url.trim_end_matches('/');
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{}/chat/completions", base)
+        };
         let body = serde_json::json!({
             "model": config.model,
             "messages": sanitized_messages,

@@ -16,6 +16,23 @@ export interface FileContentPayload {
   size: number;
 }
 
+export interface TabItem {
+  path: string;
+  name: string;
+  content: string;
+  language: string;
+  isDirty: boolean;
+}
+
+export interface AppSettings {
+  editorFontSize: number;
+  uiFontSize: number;
+  fontFamily: string;
+  wordWrap: boolean;
+  tabSize: number;
+  theme: string;
+}
+
 export interface SymbolItem {
   id: string;
   name: string;

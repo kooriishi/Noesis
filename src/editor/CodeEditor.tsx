@@ -18,6 +18,9 @@ interface CodeEditorProps {
   filePath: string;
   initialContent: string;
   language: string;
+  fontSize?: number;
+  fontFamily?: string;
+  wordWrap?: boolean;
   onContentChange: (newContent: string) => void;
   onSave: () => void;
   onExplainSelection: (snippet: string, startLine: number, endLine: number) => void;
@@ -29,6 +32,9 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   filePath,
   initialContent,
   language,
+  fontSize = 13.5,
+  fontFamily = 'Consolas, "Fira Code", monospace',
+  wordWrap = false,
   onContentChange,
   onSave,
   onExplainSelection,
@@ -127,11 +133,12 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         oneDark,
         getLanguageExtension(language),
+        wordWrap ? EditorView.lineWrapping : [],
         keymap.of([...defaultKeymap, ...historyKeymap]),
         saveKeyBinding,
         updateListener,
         EditorView.theme({
-          '&': { height: '100%', fontSize: '13.5px', fontFamily: 'Consolas, "Fira Code", monospace' },
+          '&': { height: '100%', fontSize: `${fontSize}px`, fontFamily: fontFamily },
           '.cm-scroller': { overflow: 'auto' },
           '.cm-content': { padding: '12px 0' },
           '.cm-line': { padding: '0 16px', lineHeight: '1.6' },
@@ -149,7 +156,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     return () => {
       view.destroy();
     };
-  }, [filePath, language]);
+  }, [filePath, language, fontSize, fontFamily, wordWrap]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#1e1e2e' }}>
