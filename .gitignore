@@ -43,5 +43,5 @@ Thumbs.db
 *.sublime-workspace
 
 # Temporary & scratch dirs
-scratch/
-tmp/
+/scratch/
+/tmp/

@@ -74,6 +74,7 @@ impl LearnEngine {
         snippet: &str,
         start_line: u32,
         end_line: u32,
+        verified: bool,
     ) -> Vec<ExplanationCard> {
         let clean_snippet = snippet.trim();
         let first_line = clean_snippet.lines().next().unwrap_or("代码片段");
@@ -102,7 +103,7 @@ impl LearnEngine {
                     file_path, start_line, end_line
                 ),
                 source: source.clone(),
-                verified: true,
+                verified,
                 is_expanded: false,
             },
             ExplanationCard {
@@ -119,7 +120,7 @@ impl LearnEngine {
                     代码采用典型的防御式编程模式。在进入真正业务计算前，先完成了所有的参数校验，\
                     从而将可能存在的异常情况在最早期拦截。".to_string(),
                 source: source.clone(),
-                verified: true,
+                verified,
                 is_expanded: false,
             },
             ExplanationCard {
@@ -135,7 +136,7 @@ impl LearnEngine {
                 detailed_body: "### 语法特性剖析\n\n\
                     此处的语法结构体现了语言最佳实践，避免了冗长的防御逻辑，代码表意直接，具备编译期可靠性保障。".to_string(),
                 source: source.clone(),
-                verified: true,
+                verified,
                 is_expanded: false,
             },
             ExplanationCard {
@@ -151,20 +152,37 @@ impl LearnEngine {
                 detailed_body: "### 原理溯源\n\n\
                     本模块设计背后的核心驱动力是降低分布式/异步环境下的偶合度，通过单向数据流减少死锁与竞态风险。".to_string(),
                 source,
-                verified: true,
+                verified,
                 is_expanded: false,
             },
         ]
     }
 
-    /// Verifies that the source references actually exist in the file
-    pub fn verify_source_reference(file_content: &str, start_line: u32, end_line: u32) -> bool {
+    /// Programmatically verifies that the source code snippet actually exists in the file within the given line range
+    pub fn verify_source_reference(
+        file_content: &str,
+        start_line: u32,
+        end_line: u32,
+        expected_snippet: &str,
+    ) -> bool {
         let lines: Vec<&str> = file_content.lines().collect();
         let total = lines.len() as u32;
         if start_line == 0 || start_line > total || end_line < start_line || end_line > total {
             return false;
         }
-        true
+
+        let s_idx = (start_line - 1) as usize;
+        let e_idx = end_line as usize;
+        let actual_slice = lines[s_idx..e_idx].join("\n");
+
+        let normalized_actual: String = actual_slice.chars().filter(|c| !c.is_whitespace()).collect();
+        let normalized_expected: String = expected_snippet.chars().filter(|c| !c.is_whitespace()).collect();
+
+        if normalized_expected.is_empty() {
+            return false;
+        }
+
+        normalized_actual.contains(&normalized_expected) || normalized_expected.contains(&normalized_actual)
     }
 
     /// Generates rewording when user marks a snippet as confusing
@@ -236,6 +254,7 @@ mod tests {
             "pub fn run() -> Result<()> {}",
             10,
             15,
+            true,
         );
         assert_eq!(cards.len(), 4);
         assert!(matches!(cards[0].perspective, Perspective::Overall));
@@ -248,9 +267,11 @@ mod tests {
     #[test]
     fn test_verify_source_reference() {
         let code = "line 1\nline 2\nline 3\nline 4\nline 5";
-        assert!(LearnEngine::verify_source_reference(code, 1, 3));
-        assert!(!LearnEngine::verify_source_reference(code, 0, 3));
-        assert!(!LearnEngine::verify_source_reference(code, 2, 10));
+        assert!(LearnEngine::verify_source_reference(code, 1, 3, "line 2"));
+        assert!(LearnEngine::verify_source_reference(code, 2, 4, "line 2\nline 3"));
+        assert!(!LearnEngine::verify_source_reference(code, 1, 2, "line 5"));
+        assert!(!LearnEngine::verify_source_reference(code, 0, 3, "line 1"));
+        assert!(!LearnEngine::verify_source_reference(code, 2, 10, "line 2"));
     }
 
     #[test]

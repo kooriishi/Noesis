@@ -226,4 +226,11 @@ export const ApiService = {
     }
     return [];
   },
+
+  async getExpertSystemPrompt(): Promise<string> {
+    if (isTauriEnv()) {
+      return await invoke<string>('get_expert_system_prompt');
+    }
+    return '';
+  },
 };

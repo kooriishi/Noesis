@@ -1,14 +1,13 @@
-name: CI - Windows & Ubuntu Dual Build
+name: Release - Multiplatform Desktop Artifacts
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
 
 jobs:
-  build:
-    name: Build on ${{ matrix.platform }}
+  release:
+    name: Build & Release on ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,18 +22,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js & pnpm
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 12.14.0
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: 'pnpm'
 
-      - name: Install Linux dependencies (Ubuntu WebKitGTK 4.1)
+      - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
@@ -51,8 +50,6 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'windows-x86_64' && 'x86_64-pc-windows-msvc' || 'x86_64-unknown-linux-gnu' }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -62,20 +59,13 @@ jobs:
       - name: Install Frontend Dependencies
         run: pnpm install
 
-      - name: Frontend Typecheck & Build
-        run: pnpm build
-
-      - name: Check Rust Kernel Workspace
-        working-directory: ./src-tauri
-        run: cargo check --all-targets
-
       - name: Build Tauri 2 Application
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'NOESIS v__VERSION__'
-          releaseBody: 'NOESIS Code-Learning IDE automatic build'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'NOESIS ${{ github.ref_name }}'
+          releaseBody: 'NOESIS Code-Learning Desktop IDE release'
           releaseDraft: true
           prerelease: false

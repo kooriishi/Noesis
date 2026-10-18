@@ -8,7 +8,9 @@ use noesis_runner::{CodeRunner, RunRequest, RunResponse};
 use noesis_store::{ConfusionMark, DbStore, ExerciseRecord};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
+
+const EXPERT_SYSTEM_PROMPT: &str = include_str!("../../prompts/code_guide_expert.system.md");
 
 pub struct AppState {
     pub project_manager: Mutex<Option<ProjectManager>>,
@@ -19,16 +21,22 @@ pub struct AppState {
 }
 
 #[tauri::command]
+fn get_expert_system_prompt() -> Result<String, String> {
+    Ok(EXPERT_SYSTEM_PROMPT.to_string())
+}
+
+#[tauri::command]
 fn open_project(path: String, state: State<'_, AppState>) -> Result<FileNode, String> {
     let pm = ProjectManager::new(&path).map_err(|e| e.to_string())?;
     let tree = pm.build_tree(6).map_err(|e| e.to_string())?;
-    *state.project_manager.lock().unwrap() = Some(pm);
+    let mut guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+    *guard = Some(pm);
     Ok(tree)
 }
 
 #[tauri::command]
 fn get_project_tree(state: State<'_, AppState>) -> Result<Option<FileNode>, String> {
-    let pm_guard = state.project_manager.lock().unwrap();
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     if let Some(pm) = pm_guard.as_ref() {
         let tree = pm.build_tree(6).map_err(|e| e.to_string())?;
         Ok(Some(tree))
@@ -39,33 +47,30 @@ fn get_project_tree(state: State<'_, AppState>) -> Result<Option<FileNode>, Stri
 
 #[tauri::command]
 fn read_file(path: String, state: State<'_, AppState>) -> Result<FileContentPayload, String> {
-    let pm_guard = state.project_manager.lock().unwrap();
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     if let Some(pm) = pm_guard.as_ref() {
         pm.read_file(&path).map_err(|e| e.to_string())
     } else {
-        // Fallback: direct read if path is absolute
-        let direct_pm = ProjectManager::new(".").map_err(|e| e.to_string())?;
-        direct_pm.read_file(&path).map_err(|e| e.to_string())
+        Err("尚未打开任何工程，请先在左侧选择工程目录。".to_string())
     }
 }
 
 #[tauri::command]
 fn save_file(path: String, content: String, state: State<'_, AppState>) -> Result<String, String> {
-    let pm_guard = state.project_manager.lock().unwrap();
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     if let Some(pm) = pm_guard.as_ref() {
         pm.save_file(&path, &content).map_err(|e| e.to_string())
     } else {
-        let direct_pm = ProjectManager::new(".").map_err(|e| e.to_string())?;
-        direct_pm.save_file(&path, &content).map_err(|e| e.to_string())
+        Err("尚未打开任何工程，无法保存文件。".to_string())
     }
 }
 
 #[tauri::command]
 fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
-    let pm_guard = state.project_manager.lock().unwrap();
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
 
-    // Gather text files for indexing
+    // Gather valid source code files for indexing (exclude plaintext/markdown/json from code symbols)
     let mut files_to_index = Vec::new();
     let tree = pm.build_tree(10).map_err(|e| e.to_string())?;
 
@@ -77,7 +82,11 @@ fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
                 }
             }
         } else if let Some(lang) = &node.language {
-            if lang != "plaintext" {
+            let code_langs = [
+                "rust", "typescript", "javascript", "python",
+                "go", "java", "csharp", "kotlin", "swift", "c", "cpp", "php",
+            ];
+            if code_langs.contains(&lang.as_str()) {
                 if let Ok(payload) = pm.read_file(&node.path) {
                     acc.push((node.path.clone(), payload.content, lang.clone()));
                 }
@@ -87,14 +96,15 @@ fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
 
     collect_files(&tree, pm, &mut files_to_index);
     let map = state.indexer.compute_project_map(&files_to_index);
-    *state.project_map.lock().unwrap() = Some(map.clone());
+    let mut map_guard = state.project_map.lock().map_err(|e| e.to_string())?;
+    *map_guard = Some(map.clone());
 
     Ok(map)
 }
 
 #[tauri::command]
 fn get_project_map(state: State<'_, AppState>) -> Result<Option<ProjectMap>, String> {
-    let map = state.project_map.lock().unwrap().clone();
+    let map = state.project_map.lock().map_err(|e| e.to_string())?.clone();
     Ok(map)
 }
 
@@ -104,8 +114,25 @@ fn explain_code(
     snippet: String,
     start_line: u32,
     end_line: u32,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ExplanationCard>, String> {
-    Ok(LearnEngine::generate_structured_cards(&file_path, &snippet, start_line, end_line))
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+    let verified = if let Some(pm) = pm_guard.as_ref() {
+        if let Ok(payload) = pm.read_file(&file_path) {
+            LearnEngine::verify_source_reference(&payload.content, start_line, end_line, &snippet)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok(LearnEngine::generate_structured_cards(
+        &file_path,
+        &snippet,
+        start_line,
+        end_line,
+        verified,
+    ))
 }
 
 #[tauri::command]
@@ -118,9 +145,14 @@ fn mark_confusion(
     state: State<'_, AppState>,
 ) -> Result<RewordingResult, String> {
     let rewording = LearnEngine::handle_confusion_mark(&category, &snippet);
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        pm_guard.as_ref().map(|pm| pm.normalized_root())
+    };
 
     let mark = ConfusionMark {
         id: format!("mark-{}-{}", chrono::Utc::now().timestamp_millis(), start_line),
+        project_id,
         file_path,
         line_start: start_line,
         line_end: end_line,
@@ -139,9 +171,13 @@ fn get_confusion_marks(
     file_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<ConfusionMark>, String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        pm_guard.as_ref().map(|pm| pm.normalized_root())
+    };
     state
         .store
-        .list_marks(file_path.as_deref())
+        .list_marks(file_path.as_deref(), project_id.as_deref())
         .map_err(|e| e.to_string())
 }
 
@@ -164,6 +200,22 @@ async fn send_llm_chat(
     messages: Vec<ChatMessage>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    // 1. Verify outbound content limits and sanitize
+    let _ = state
+        .llm
+        .filter()
+        .inspect_outbound(&config, &messages)
+        .map_err(|e| e.to_string())?;
+
+    // 2. Validate that no message carries sensitive configuration files
+    for m in &messages {
+        for word in m.content.split_whitespace() {
+            if word.contains(".env") || word.contains("id_rsa") || word.contains(".pem") {
+                let _ = state.llm.filter().check_file_path_allowed(word).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     state
         .llm
         .send_chat(&config, messages)
@@ -183,25 +235,30 @@ fn list_due_reviews(state: State<'_, AppState>) -> Result<Vec<ExerciseRecord>, S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let db_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("noesis_local.db")))
-        .unwrap_or_else(|| PathBuf::from("noesis_local.db"));
-
-    let store = DbStore::open(&db_path).unwrap_or_else(|_| DbStore::in_memory().unwrap());
-
-    let state = AppState {
-        project_manager: Mutex::new(None),
-        project_map: Mutex::new(None),
-        store,
-        llm: LlmGateway::new(),
-        indexer: CodeIndexer::new(),
-    };
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(state)
+        .setup(|app| {
+            let app_data = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let _ = std::fs::create_dir_all(&app_data);
+            let db_path = app_data.join("noesis_local.db");
+
+            let store = DbStore::open(&db_path).unwrap_or_else(|err| {
+                eprintln!("Warning: Failed to open AppData database ({:?}), falling back to memory: {}", db_path, err);
+                DbStore::in_memory().expect("In-memory database initialization failed")
+            });
+
+            let state = AppState {
+                project_manager: Mutex::new(None),
+                project_map: Mutex::new(None),
+                store,
+                llm: LlmGateway::new(),
+                indexer: CodeIndexer::new(),
+            };
+
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_project,
             get_project_tree,
@@ -215,7 +272,8 @@ pub fn run() {
             preview_outbound,
             send_llm_chat,
             run_scratch_code,
-            list_due_reviews
+            list_due_reviews,
+            get_expert_system_prompt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -48,6 +48,7 @@ pub struct SymbolRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfusionMark {
     pub id: String,
+    pub project_id: Option<String>,
     pub file_path: String,
     pub line_start: u32,
     pub line_end: u32,
@@ -170,6 +171,7 @@ impl DbStore {
 
             CREATE TABLE IF NOT EXISTS marks (
                 id TEXT PRIMARY KEY,
+                project_id TEXT,
                 file_path TEXT NOT NULL,
                 line_start INTEGER NOT NULL,
                 line_end INTEGER NOT NULL,
@@ -202,6 +204,7 @@ impl DbStore {
             );
             "#,
         )?;
+        let _ = conn.execute("ALTER TABLE marks ADD COLUMN project_id TEXT;", []);
         Ok(())
     }
 
@@ -209,11 +212,12 @@ impl DbStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
-            INSERT OR REPLACE INTO marks (id, file_path, line_start, line_end, code_snippet, category, explanation, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT OR REPLACE INTO marks (id, project_id, file_path, line_start, line_end, code_snippet, category, explanation, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
                 mark.id,
+                mark.project_id,
                 mark.file_path,
                 mark.line_start,
                 mark.line_end,
@@ -226,48 +230,45 @@ impl DbStore {
         Ok(())
     }
 
-    pub fn list_marks(&self, file_path: Option<&str>) -> std::result::Result<Vec<ConfusionMark>, StoreError> {
+    pub fn list_marks(
+        &self,
+        file_path: Option<&str>,
+        project_id: Option<&str>,
+    ) -> std::result::Result<Vec<ConfusionMark>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut marks = Vec::new();
 
-        if let Some(path) = file_path {
-            let mut stmt = conn.prepare(
-                "SELECT id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks WHERE file_path = ?1 ORDER BY created_at DESC"
-            )?;
-            let rows = stmt.query_map(params![path], |row| {
-                Ok(ConfusionMark {
-                    id: row.get(0)?,
-                    file_path: row.get(1)?,
-                    line_start: row.get(2)?,
-                    line_end: row.get(3)?,
-                    code_snippet: row.get(4)?,
-                    category: row.get(5)?,
-                    explanation: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            })?;
-            for r in rows {
-                marks.push(r?);
-            }
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks ORDER BY created_at DESC"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(ConfusionMark {
-                    id: row.get(0)?,
-                    file_path: row.get(1)?,
-                    line_start: row.get(2)?,
-                    line_end: row.get(3)?,
-                    code_snippet: row.get(4)?,
-                    category: row.get(5)?,
-                    explanation: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            })?;
-            for r in rows {
-                marks.push(r?);
-            }
+        let query = match (file_path, project_id) {
+            (Some(_), Some(_)) => "SELECT id, project_id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks WHERE file_path = ?1 AND project_id = ?2 ORDER BY created_at DESC",
+            (Some(_), None) => "SELECT id, project_id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks WHERE file_path = ?1 ORDER BY created_at DESC",
+            (None, Some(_)) => "SELECT id, project_id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks WHERE project_id = ?1 ORDER BY created_at DESC",
+            (None, None) => "SELECT id, project_id, file_path, line_start, line_end, code_snippet, category, explanation, created_at FROM marks ORDER BY created_at DESC",
+        };
+
+        let mut stmt = conn.prepare(query)?;
+        let row_mapper = |row: &rusqlite::Row| {
+            Ok(ConfusionMark {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                file_path: row.get(2)?,
+                line_start: row.get(3)?,
+                line_end: row.get(4)?,
+                code_snippet: row.get(5)?,
+                category: row.get(6)?,
+                explanation: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        };
+
+        let rows = match (file_path, project_id) {
+            (Some(f), Some(p)) => stmt.query_map(params![f, p], row_mapper)?,
+            (Some(f), None) => stmt.query_map(params![f], row_mapper)?,
+            (None, Some(p)) => stmt.query_map(params![p], row_mapper)?,
+            (None, None) => stmt.query_map([], row_mapper)?,
+        };
+
+        for r in rows {
+            marks.push(r?);
         }
         Ok(marks)
     }
@@ -341,6 +342,7 @@ mod tests {
         let store = DbStore::in_memory().unwrap();
         let mark = ConfusionMark {
             id: "mark-1".to_string(),
+            project_id: Some("proj-noesis".to_string()),
             file_path: "src/main.rs".to_string(),
             line_start: 10,
             line_end: 20,
@@ -351,15 +353,19 @@ mod tests {
         };
 
         store.save_mark(&mark).unwrap();
-        let marks = store.list_marks(None).unwrap();
+        let marks = store.list_marks(None, None).unwrap();
         assert_eq!(marks.len(), 1);
         assert_eq!(marks[0].id, "mark-1");
+        assert_eq!(marks[0].project_id, Some("proj-noesis".to_string()));
         assert_eq!(marks[0].category, "logic");
 
-        let filtered = store.list_marks(Some("src/main.rs")).unwrap();
+        let filtered = store.list_marks(Some("src/main.rs"), Some("proj-noesis")).unwrap();
         assert_eq!(filtered.len(), 1);
 
-        let none_match = store.list_marks(Some("nonexistent.rs")).unwrap();
+        let none_match = store.list_marks(Some("nonexistent.rs"), None).unwrap();
         assert_eq!(none_match.len(), 0);
+
+        let diff_proj = store.list_marks(None, Some("other-proj")).unwrap();
+        assert_eq!(diff_proj.len(), 0);
     }
 }

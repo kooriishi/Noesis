@@ -116,6 +116,8 @@ export const ShellLayout: React.FC = () => {
   const [confusionMarks, setConfusionMarks] = useState<ConfusionMark[]>([]);
   const [activeRewording, setActiveRewording] = useState<RewordingResult | null>(null);
   const [dueReviews, setDueReviews] = useState<ExerciseRecord[]>([]);
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
+  const [activeSidebarTab, setActiveSidebarTab] = useState<'cards' | 'confusion' | 'chat' | 'settings'>('cards');
 
   // Scratchpad State
   const [showScratch, setShowScratch] = useState<boolean>(false);
@@ -260,9 +262,15 @@ export const ShellLayout: React.FC = () => {
   const handleCloseTab = (filePath: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
 
-    const index = tabs.findIndex((t) => t.path === filePath);
-    if (index === -1) return;
+    const targetTab = tabs.find((t) => t.path === filePath);
+    if (!targetTab) return;
 
+    if (targetTab.isDirty) {
+      const confirmClose = window.confirm(`文件 "${targetTab.name}" 有未保存的修改，关闭将丢失这些修改。确定关闭吗？`);
+      if (!confirmClose) return;
+    }
+
+    const index = tabs.findIndex((t) => t.path === filePath);
     const newTabs = tabs.filter((t) => t.path !== filePath);
     setTabs(newTabs);
 
@@ -309,8 +317,12 @@ export const ShellLayout: React.FC = () => {
 
   const handleExplainSelection = async (snippet: string, startLine: number, endLine: number) => {
     if (!activeTab) return;
+    setRightCollapsed(false);
+    setActiveSidebarTab('cards');
+    setIsExplaining(true);
+
     try {
-      // 1. Generate local 4-perspective cards
+      // 1. Generate local 4-perspective cards with verified citation check from Rust
       const generatedCards = await ApiService.explainCode(
         activeTab.path,
         snippet,
@@ -318,23 +330,101 @@ export const ShellLayout: React.FC = () => {
         endLine
       );
 
-      // 2. If DeepSeek API key is present, query DeepSeek model directly for deep analysis!
+      // 2. If DeepSeek API key is present, perform deep contextual multi-perspective analysis
       if (llmConfig.api_key.trim().length > 5) {
-        const prompt = `请针对以下选区代码进行深度导读，严格按照【整体】、【逻辑】、【语法】、【原理】四层视角展开：\n\n文件: ${activeTab.path} (行 ${startLine}-${endLine})\n\`\`\`${activeTab.language}\n${snippet}\n\`\`\``;
-        const aiResponse = await ApiService.sendLlmChat(llmConfig, [
-          { role: 'system', content: '你是一位精通底层原理与工程架构的代码深度导读专家。' },
-          { role: 'user', content: prompt },
-        ]);
+        let systemPrompt = await ApiService.getExpertSystemPrompt();
+        if (!systemPrompt || systemPrompt.trim().length === 0) {
+          systemPrompt = '你是一位精通底层原理与工程架构的 NOESIS 代码深度导读专家。请严格按照【整体】、【逻辑】、【语法】、【原理】四层正交视角给出详尽透视。';
+        }
 
-        // Augment detailed body of the overall perspective card with the live DeepSeek insights
+        const userPrompt = `请针对以下代码选区进行深度导读：
+
+【文件路径】: ${activeTab.path} (行 ${startLine} - ${endLine})
+【编程语言】: ${activeTab.language}
+【代码选区】:
+\`\`\`${activeTab.language}
+${snippet}
+\`\`\`
+
+【输出格式要求】：
+请以纯 JSON 格式输出，不要包含任何额外的问候或反引号围栏。JSON 格式如下：
+{
+  "overall": {
+    "title": "整体架构与数据流",
+    "one_sentence": "1句话核心结论（直击要害，概括本段代码在系统全局拓扑中的角色）",
+    "bullets": ["职责边界要点", "依赖上下游关系", "数据流向契约"],
+    "detail": "整体视角深度解析与数据流向推演（支持 Markdown 格式）"
+  },
+  "logic": {
+    "title": "控制流程与边界条件",
+    "one_sentence": "1句话核心结论（概括控制流、卫语句与关键边界）",
+    "bullets": ["分支控制要点", "状态跃迁原子性", "极端边界与回滚"],
+    "detail": "控制流分发、状态机跃迁与极端情况处理深度详述"
+  },
+  "syntax": {
+    "title": "语言特性与惯用写法",
+    "one_sentence": "1句话核心结论（概括所用语言特性的惯用写法）",
+    "bullets": ["语言特有零成本抽象", "所有权/作用域/生命周期", "错误处理契约"],
+    "detail": "语言特性惯用法剖析，对比朴素写法的优势"
+  },
+  "principle": {
+    "title": "底层原理与算法设计",
+    "one_sentence": "1句话核心结论（直击底层物理代价与算法设计动机）",
+    "bullets": ["核心算法时空局部性", "系统调用/事件循环机制", "设计者规避的物理代价"],
+    "detail": "系统底层机制（内存局部性、调度、I/O 等）与作者规避的代价详述"
+  }
+}`;
+
+        try {
+          const aiResponse = await ApiService.sendLlmChat(llmConfig, [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ]);
+
+          // Attempt to extract structured JSON from response
+          const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            const perspectives: Array<'overall' | 'logic' | 'syntax' | 'principle'> = [
+              'overall',
+              'logic',
+              'syntax',
+              'principle',
+            ];
+
+            for (const p of perspectives) {
+              if (parsed[p]) {
+                const targetCard = generatedCards.find((c) => c.perspective === p);
+                if (targetCard) {
+                  if (parsed[p].title) targetCard.title = parsed[p].title;
+                  if (parsed[p].one_sentence) targetCard.one_sentence = parsed[p].one_sentence;
+                  if (Array.isArray(parsed[p].bullets) && parsed[p].bullets.length > 0) {
+                    targetCard.key_bullets = parsed[p].bullets;
+                  }
+                  if (parsed[p].detail) targetCard.detailed_body = parsed[p].detail;
+                }
+              }
+            }
+          } else {
+            // If model returned plain text, attach it to overall card
+            if (generatedCards.length > 0) {
+              generatedCards[0].detailed_body = `### DeepSeek 深度解析\n\n${aiResponse}\n\n---\n${generatedCards[0].detailed_body}`;
+            }
+          }
+        } catch (chatErr: any) {
+          console.warn('DeepSeek query failed, falling back to verified local cards:', chatErr);
+        }
+      } else {
         if (generatedCards.length > 0) {
-          generatedCards[0].detailed_body = `### DeepSeek 模型深度解析\n\n${aiResponse}\n\n---\n${generatedCards[0].detailed_body}`;
+          generatedCards[0].detailed_body = `> [!NOTE]\n> 当前未配置 DeepSeek API Key，已为您展示本地离线结构卡片。在右侧「模型/安全」面板或按 \`Ctrl+,\` 配置 API Key 后，可实时获取针对该代码片段的原理深度剖析。\n\n${generatedCards[0].detailed_body}`;
         }
       }
 
       setCards(generatedCards);
     } catch (err: any) {
       alert(`解读生成遇到异常: ${err?.message || err}`);
+    } finally {
+      setIsExplaining(false);
     }
   };
 
@@ -345,14 +435,60 @@ export const ShellLayout: React.FC = () => {
     category: string
   ) => {
     if (!activeTab) return;
+    setRightCollapsed(false);
+    setActiveSidebarTab('confusion');
+
     try {
-      const rewording = await ApiService.markConfusion(
+      let rewording = await ApiService.markConfusion(
         activeTab.path,
         startLine,
         endLine,
         snippet,
         category
       );
+
+      // If DeepSeek API key is present, query DeepSeek with specific pedagogical降维strategy
+      if (llmConfig.api_key.trim().length > 5) {
+        const prompt = `用户在阅读文件 "${activeTab.path}" 第 ${startLine}-${endLine} 行代码时，针对【${category}】视角标记了「看不懂」：
+\`\`\`${activeTab.language}
+${snippet}
+\`\`\`
+
+请根据《NOESIS 代码深度导读专家》准则的分类降维策略为该代码片段进行针对性重讲：
+- overall（整体）：引入生活/工程实体系统类比（如物流分拣机、机场安检流）。
+- logic（逻辑）：剥离多余代码，提供 3 行以内的最简最小可运行示例。
+- syntax（语法）：用最原始的 if-else 或基础语句等价重写该语法糖。
+- principle（底层原理）：指出作者最害怕什么物理代价（爆内存、高延迟、死锁？），反推设计动机。
+
+请以纯 JSON 格式输出，不要有额外文本：
+{
+  "analogy": "生活或工程实体类比，或者设计动机反推",
+  "minimal_example": "3行内极简示例或朴素等价重写",
+  "prerequisite_concept": "前置基础概念",
+  "guidance": "下一步阅读建议"
+}`;
+
+        try {
+          const aiResponse = await ApiService.sendLlmChat(llmConfig, [
+            { role: 'system', content: '你是一位精通启发式教学的代码深度导读专家。' },
+            { role: 'user', content: prompt }
+          ]);
+          const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            rewording = {
+              original_category: category,
+              analogy: parsed.analogy || rewording.analogy,
+              minimal_example: parsed.minimal_example || rewording.minimal_example,
+              prerequisite_concept: parsed.prerequisite_concept || rewording.prerequisite_concept,
+              guidance: parsed.guidance || rewording.guidance,
+            };
+          }
+        } catch (chatErr) {
+          console.warn('DeepSeek rewording failed, using baseline:', chatErr);
+        }
+      }
+
       setActiveRewording(rewording);
       await loadConfusionMarks();
     } catch (err: any) {
@@ -564,19 +700,17 @@ export const ShellLayout: React.FC = () => {
       {/* Main 3-Column Work Area with Resizers */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
         {/* Left: Project Explorer & Map */}
-        {!leftCollapsed && (
-          <div style={{ width: `${leftWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden' }}>
-            <ProjectSidebar
-              currentProject={currentProject}
-              projectMap={projectMap}
-              activeFilePath={activeTabPath || ''}
-              onSelectFile={handleOpenFile}
-              onOpenProject={() => handleOpenProject()}
-              onTriggerIndex={handleTriggerIndex}
-              isIndexing={isIndexing}
-            />
-          </div>
-        )}
+        <div style={{ width: `${leftWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden', display: leftCollapsed ? 'none' : 'block' }}>
+          <ProjectSidebar
+            currentProject={currentProject}
+            projectMap={projectMap}
+            activeFilePath={activeTabPath || ''}
+            onSelectFile={handleOpenFile}
+            onOpenProject={() => handleOpenProject()}
+            onTriggerIndex={handleTriggerIndex}
+            isIndexing={isIndexing}
+          />
+        </div>
 
         {/* Left Resizer Handle */}
         {!leftCollapsed && (
@@ -765,20 +899,20 @@ export const ShellLayout: React.FC = () => {
         )}
 
         {/* Right: AI Guidance, 4-Perspective Cards, Clarifications, and Chat */}
-        {!rightCollapsed && (
-          <div style={{ width: `${rightWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden' }}>
-            <AiSidebar
-              cards={cards}
-              confusionMarks={confusionMarks}
-              activeRewording={activeRewording}
-              llmConfig={llmConfig}
-              onUpdateLlmConfig={updateLlmConfig}
-              onSendChat={handleSendChat}
-              onPreviewOutbound={handlePreviewOutbound}
-              onMarkCardFeedback={handleMarkCardFeedback}
-            />
-          </div>
-        )}
+        <div style={{ width: `${rightWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden', display: rightCollapsed ? 'none' : 'block' }}>
+          <AiSidebar
+            cards={cards}
+            confusionMarks={confusionMarks}
+            activeRewording={activeRewording}
+            llmConfig={llmConfig}
+            isExplaining={isExplaining}
+            activeSidebarTab={activeSidebarTab}
+            onUpdateLlmConfig={updateLlmConfig}
+            onSendChat={handleSendChat}
+            onPreviewOutbound={handlePreviewOutbound}
+            onMarkCardFeedback={handleMarkCardFeedback}
+          />
+        </div>
       </div>
 
       {/* Bottom Status Bar */}
@@ -801,7 +935,10 @@ export const ShellLayout: React.FC = () => {
             <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#a6e3a1' }} />
             Rust 内核 (Tauri 2) 在线
           </span>
-          <span>DeepSeek API: 已就绪</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: llmConfig.api_key.trim().length > 5 ? '#a6e3a1' : '#f9e2af' }}>
+            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: llmConfig.api_key.trim().length > 5 ? '#a6e3a1' : '#f9e2af' }} />
+            {llmConfig.api_key.trim().length > 5 ? `DeepSeek: ${llmConfig.model}` : 'DeepSeek: 未配置密钥 (离线模式)'}
+          </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>

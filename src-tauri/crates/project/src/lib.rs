@@ -169,7 +169,22 @@ impl ProjectManager {
             self.root_path.join(p)
         };
 
-        let meta = fs::metadata(&target_path)?;
+        let canonical_target = fs::canonicalize(&target_path)?;
+        if !canonical_target.starts_with(&self.root_path) {
+            return Err(ProjectError::InvalidPath(format!(
+                "Security: path '{}' escapes project root",
+                canonical_target.to_string_lossy()
+            )));
+        }
+
+        if is_sensitive_path(&canonical_target) {
+            return Err(ProjectError::InvalidPath(format!(
+                "Security: access to sensitive file '{}' is prohibited",
+                canonical_target.to_string_lossy()
+            )));
+        }
+
+        let meta = fs::metadata(&canonical_target)?;
         let max_size = 5 * 1024 * 1024; // 5MB limit
         if meta.len() > max_size {
             return Err(ProjectError::FileTooLarge {
@@ -178,16 +193,16 @@ impl ProjectManager {
             });
         }
 
-        let raw = fs::read(&target_path)?;
+        let raw = fs::read(&canonical_target)?;
         let content = String::from_utf8(raw).map_err(|_| ProjectError::NotUtf8)?;
         let hash = compute_hash(&content);
-        let file_name = target_path
+        let file_name = canonical_target
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
 
         Ok(FileContentPayload {
-            path: normalize_path(&target_path.to_string_lossy()),
+            path: normalize_path(&canonical_target.to_string_lossy()),
             content,
             hash,
             language: detect_language(&file_name),
@@ -203,13 +218,43 @@ impl ProjectManager {
             self.root_path.join(p)
         };
 
-        if let Some(parent) = target_path.parent() {
+        let parent = target_path.parent().unwrap_or(&target_path);
+        if !parent.exists() {
             fs::create_dir_all(parent)?;
+        }
+
+        let canonical_parent = fs::canonicalize(parent)?;
+        if !canonical_parent.starts_with(&self.root_path) {
+            return Err(ProjectError::InvalidPath(format!(
+                "Security: target directory '{}' escapes project root",
+                canonical_parent.to_string_lossy()
+            )));
+        }
+
+        if is_sensitive_path(&target_path) {
+            return Err(ProjectError::InvalidPath(format!(
+                "Security: saving sensitive file '{}' is prohibited",
+                target_path.to_string_lossy()
+            )));
         }
 
         fs::write(&target_path, content)?;
         Ok(compute_hash(content))
     }
+}
+
+pub fn is_sensitive_path<P: AsRef<Path>>(path: P) -> bool {
+    let lower = path.as_ref().to_string_lossy().to_lowercase();
+    let blocked = [
+        ".env", ".key", ".pem", ".pfx", ".cert", ".crt",
+        "id_rsa", "id_ed25519", "credentials", "secrets",
+    ];
+    for b in blocked {
+        if lower.contains(b) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn normalize_path(path: &str) -> String {
@@ -250,6 +295,18 @@ pub fn detect_language(filename: &str) -> String {
         "yaml".to_string()
     } else if lower.ends_with(".sql") {
         "sql".to_string()
+    } else if lower.ends_with(".go") {
+        "go".to_string()
+    } else if lower.ends_with(".java") {
+        "java".to_string()
+    } else if lower.ends_with(".cs") {
+        "csharp".to_string()
+    } else if lower.ends_with(".kt") || lower.ends_with(".kts") {
+        "kotlin".to_string()
+    } else if lower.ends_with(".swift") {
+        "swift".to_string()
+    } else if lower.ends_with(".php") {
+        "php".to_string()
     } else {
         "plaintext".to_string()
     }
@@ -271,6 +328,10 @@ mod tests {
         assert_eq!(detect_language("App.tsx"), "typescript");
         assert_eq!(detect_language("script.py"), "python");
         assert_eq!(detect_language("config.toml"), "toml");
+        assert_eq!(detect_language("server.go"), "go");
+        assert_eq!(detect_language("Application.java"), "java");
+        assert_eq!(detect_language("Program.cs"), "csharp");
+        assert_eq!(detect_language("Main.kt"), "kotlin");
         assert_eq!(detect_language("unknown.xyz"), "plaintext");
     }
 
@@ -282,5 +343,16 @@ mod tests {
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
         assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    fn test_is_sensitive_path() {
+        assert!(is_sensitive_path(".env"));
+        assert!(is_sensitive_path("config/.env.local"));
+        assert!(is_sensitive_path("certs/server.pem"));
+        assert!(is_sensitive_path("id_rsa"));
+        assert!(is_sensitive_path("secrets/api_token.json"));
+        assert!(!is_sensitive_path("src/main.rs"));
+        assert!(!is_sensitive_path("package.json"));
     }
 }

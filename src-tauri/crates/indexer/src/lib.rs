@@ -55,9 +55,14 @@ pub struct ProjectMap {
 pub struct CodeIndexer {
     rust_fn_re: Regex,
     ts_fn_re: Regex,
+    ts_arrow_fn_re: Regex,
     py_fn_re: Regex,
+    py_class_re: Regex,
     rust_struct_re: Regex,
     ts_class_re: Regex,
+    go_fn_re: Regex,
+    go_type_re: Regex,
+    java_class_re: Regex,
 }
 
 impl Default for CodeIndexer {
@@ -65,9 +70,14 @@ impl Default for CodeIndexer {
         Self {
             rust_fn_re: Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z0-9_]+)\s*\(").unwrap(),
             ts_fn_re: Regex::new(r"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(").unwrap(),
+            ts_arrow_fn_re: Regex::new(r"(?m)^\s*(?:export\s+)?(?:const|let)\s+([a-zA-Z0-9_]+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>").unwrap(),
             py_fn_re: Regex::new(r"(?m)^\s*(?:async\s+)?def\s+([a-zA-Z0-9_]+)\s*\(").unwrap(),
+            py_class_re: Regex::new(r"(?m)^\s*class\s+([a-zA-Z0-9_]+)").unwrap(),
             rust_struct_re: Regex::new(r"(?m)^\s*(?:pub\s+)?(?:struct|enum|trait)\s+([a-zA-Z0-9_]+)").unwrap(),
             ts_class_re: Regex::new(r"(?m)^\s*(?:export\s+)?(?:class|interface|type)\s+([a-zA-Z0-9_]+)").unwrap(),
+            go_fn_re: Regex::new(r"(?m)^\s*func\s+(?:\([^)]+\)\s+)?([a-zA-Z0-9_]+)\s*\(").unwrap(),
+            go_type_re: Regex::new(r"(?m)^\s*type\s+([a-zA-Z0-9_]+)\s+(?:struct|interface)").unwrap(),
+            java_class_re: Regex::new(r"(?m)^\s*(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?:class|interface|enum|record)\s+([a-zA-Z0-9_]+)").unwrap(),
         }
     }
 }
@@ -116,6 +126,15 @@ impl CodeIndexer {
                             line: line_num,
                             signature: Some(line.trim().to_string()),
                         });
+                    } else if let Some(caps) = self.ts_arrow_fn_re.captures(line) {
+                        symbols.push(Symbol {
+                            id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
+                            name: caps[1].to_string(),
+                            kind: "function".to_string(),
+                            file_path: file_path.to_string(),
+                            line: line_num,
+                            signature: Some(line.trim().to_string()),
+                        });
                     } else if let Some(caps) = self.ts_class_re.captures(line) {
                         symbols.push(Symbol {
                             id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
@@ -133,6 +152,48 @@ impl CodeIndexer {
                             id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
                             name: caps[1].to_string(),
                             kind: "function".to_string(),
+                            file_path: file_path.to_string(),
+                            line: line_num,
+                            signature: Some(line.trim().to_string()),
+                        });
+                    } else if let Some(caps) = self.py_class_re.captures(line) {
+                        symbols.push(Symbol {
+                            id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
+                            name: caps[1].to_string(),
+                            kind: "class".to_string(),
+                            file_path: file_path.to_string(),
+                            line: line_num,
+                            signature: Some(line.trim().to_string()),
+                        });
+                    }
+                }
+                "go" => {
+                    if let Some(caps) = self.go_fn_re.captures(line) {
+                        symbols.push(Symbol {
+                            id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
+                            name: caps[1].to_string(),
+                            kind: "function".to_string(),
+                            file_path: file_path.to_string(),
+                            line: line_num,
+                            signature: Some(line.trim().to_string()),
+                        });
+                    } else if let Some(caps) = self.go_type_re.captures(line) {
+                        symbols.push(Symbol {
+                            id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
+                            name: caps[1].to_string(),
+                            kind: "type".to_string(),
+                            file_path: file_path.to_string(),
+                            line: line_num,
+                            signature: Some(line.trim().to_string()),
+                        });
+                    }
+                }
+                "java" | "csharp" => {
+                    if let Some(caps) = self.java_class_re.captures(line) {
+                        symbols.push(Symbol {
+                            id: format!("{}:{}:{}", file_path, line_num, &caps[1]),
+                            name: caps[1].to_string(),
+                            kind: "class".to_string(),
                             file_path: file_path.to_string(),
                             line: line_num,
                             signature: Some(line.trim().to_string()),

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { searchKeymap, search } from '@codemirror/search';
 import { foldGutter, indentOnInput, bracketMatching, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { javascript } from '@codemirror/lang-javascript';
@@ -22,7 +23,7 @@ interface CodeEditorProps {
   fontFamily?: string;
   wordWrap?: boolean;
   onContentChange: (newContent: string) => void;
-  onSave: () => void;
+  onSave: (latestContent?: string) => void;
   onExplainSelection: (snippet: string, startLine: number, endLine: number) => void;
   onMarkConfusion: (snippet: string, startLine: number, endLine: number, category: string) => void;
   onSendToScratch: (snippet: string, language: string) => void;
@@ -43,12 +44,19 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const onSaveRef = useRef(onSave);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
   const [selection, setSelection] = useState<{
     text: string;
     startLine: number;
     endLine: number;
-    coords: { x: number; y: number } | null;
+    relTop: number;
+    relLeft: number;
   } | null>(null);
 
   const [showConfusionModal, setShowConfusionModal] = useState(false);
@@ -85,10 +93,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     const saveKeyBinding = keymap.of([
       {
         key: 'Mod-s',
-        run: () => {
-          onSave();
+        run: (view) => {
+          // Pass the exact current document text from the editor view!
+          const currentText = view.state.doc.toString();
+          onSaveRef.current(currentText);
           setSaveToast(true);
-          setTimeout(() => setSaveToast(false), 2000);
+          if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+          toastTimerRef.current = window.setTimeout(() => setSaveToast(false), 2000);
           return true;
         },
       },
@@ -108,11 +119,23 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           const endLine = update.state.doc.lineAt(main.to).number;
 
           const coords = viewRef.current?.coordsAtPos(main.to);
+          const containerRect = editorRef.current?.getBoundingClientRect();
+
+          let relTop = 20;
+          let relLeft = 40;
+
+          if (coords && containerRect) {
+            // Position near cursor within bounds
+            relTop = Math.max(10, Math.min(containerRect.height - 70, coords.bottom - containerRect.top + 8));
+            relLeft = Math.max(10, Math.min(containerRect.width - 340, coords.left - containerRect.left));
+          }
+
           setSelection({
             text: selectedText,
             startLine,
             endLine,
-            coords: coords ? { x: coords.left, y: coords.bottom } : null,
+            relTop,
+            relLeft,
           });
         } else {
           setSelection(null);
@@ -132,9 +155,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         highlightActiveLine(),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         oneDark,
+        search(),
         getLanguageExtension(language),
         wordWrap ? EditorView.lineWrapping : [],
-        keymap.of([...defaultKeymap, ...historyKeymap]),
+        keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         saveKeyBinding,
         updateListener,
         EditorView.theme({
@@ -154,6 +178,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     viewRef.current = view;
 
     return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       view.destroy();
     };
   }, [filePath, language, fontSize, fontFamily, wordWrap]);
@@ -162,27 +187,27 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#1e1e2e' }}>
       <div ref={editorRef} style={{ width: '100%', height: '100%' }} />
 
-      {/* Floating Selection Action Bubble */}
+      {/* Floating Selection Action Bubble - dynamically positioned near the cursor */}
       {selection && !showConfusionModal && (
         <div
           style={{
             position: 'absolute',
-            bottom: '24px',
-            right: '32px',
+            top: `${selection.relTop}px`,
+            left: `${selection.relLeft}px`,
             background: 'rgba(24, 24, 37, 0.95)',
-            border: '1px solid rgba(137, 180, 250, 0.4)',
+            border: '1px solid rgba(137, 180, 250, 0.5)',
             backdropFilter: 'blur(8px)',
             borderRadius: '8px',
-            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
             padding: '6px 10px',
             zIndex: 50,
-            animation: 'fadeIn 0.2s ease',
+            animation: 'fadeIn 0.15s ease',
           }}
         >
-          <span style={{ fontSize: '11px', color: '#a6adc8', marginRight: '4px' }}>
+          <span style={{ fontSize: '11px', color: '#a6adc8', marginRight: '4px', whiteSpace: 'nowrap' }}>
             已选 {selection.endLine - selection.startLine + 1} 行
           </span>
           <button
@@ -199,6 +224,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               fontSize: '12px',
               fontWeight: 600,
               cursor: 'pointer',
+              whiteSpace: 'nowrap',
             }}
           >
             <Sparkles size={14} />
@@ -218,6 +244,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               fontSize: '12px',
               fontWeight: 600,
               cursor: 'pointer',
+              whiteSpace: 'nowrap',
             }}
           >
             <HelpCircle size={14} />
@@ -237,6 +264,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               fontSize: '12px',
               fontWeight: 600,
               cursor: 'pointer',
+              whiteSpace: 'nowrap',
             }}
           >
             <Play size={14} />
@@ -250,8 +278,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         <div
           style={{
             position: 'absolute',
-            bottom: '24px',
-            right: '32px',
+            top: `${Math.min(selection.relTop, 300)}px`,
+            left: `${selection.relLeft}px`,
             width: '320px',
             background: '#181825',
             border: '1px solid #f38ba8',
@@ -263,7 +291,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#cdd6f4' }}>
-              标记卡点类别 (换个讲法)
+              标记卡点类别 (针对选区降维重讲)
             </span>
             <button
               onClick={() => setShowConfusionModal(false)}
@@ -273,7 +301,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             </button>
           </div>
           <p style={{ fontSize: '11px', color: '#a6adc8', marginBottom: '10px' }}>
-            选择你感到疑惑的维度，系统将自动换用生活类比、最小示例与前置概念深入拆解：
+            选择你感到困惑的具体维度，系统将根据选区真实代码换用生活类比、最小示例与前置概念深入拆解：
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
             {[
@@ -323,10 +351,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             alignItems: 'center',
             gap: '6px',
             zIndex: 100,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
           }}
         >
           <CheckCircle2 size={15} />
-          文件已保存并同步哈希
+          文件已保存并同步磁盘
         </div>
       )}
     </div>

@@ -1,14 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sparkles,
   HelpCircle,
   MessageSquare,
   ShieldCheck,
+  AlertCircle,
   ChevronDown,
   ChevronUp,
   Send,
   Eye,
   Sliders,
+  Loader2,
 } from 'lucide-react';
 import {
   ExplanationCard,
@@ -19,12 +21,15 @@ import {
   ChatMessage,
   OutboundPreview,
 } from '../types';
+import { MarkdownRenderer } from '../components/MarkdownRenderer';
 
 interface AiSidebarProps {
   cards: ExplanationCard[];
   confusionMarks: ConfusionMark[];
   activeRewording: RewordingResult | null;
   llmConfig: LlmConfig;
+  isExplaining?: boolean;
+  activeSidebarTab?: 'cards' | 'confusion' | 'chat' | 'settings';
   onUpdateLlmConfig: (config: LlmConfig) => void;
   onSendChat: (messages: ChatMessage[]) => Promise<string>;
   onPreviewOutbound: (messages: ChatMessage[]) => Promise<OutboundPreview>;
@@ -36,12 +41,20 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   confusionMarks,
   activeRewording,
   llmConfig,
+  isExplaining = false,
+  activeSidebarTab,
   onUpdateLlmConfig,
   onSendChat,
   onPreviewOutbound,
   onMarkCardFeedback,
 }) => {
   const [activeTab, setActiveTab] = useState<'cards' | 'confusion' | 'chat' | 'settings'>('cards');
+
+  useEffect(() => {
+    if (activeSidebarTab) {
+      setActiveTab(activeSidebarTab);
+    }
+  }, [activeSidebarTab]);
   const [activePerspective, setActivePerspective] = useState<PerspectiveType | 'all'>('all');
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
 
@@ -186,6 +199,26 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               })}
             </div>
 
+            {isExplaining && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 12px',
+                  marginBottom: '12px',
+                  borderRadius: '6px',
+                  background: 'rgba(137, 180, 250, 0.1)',
+                  border: '1px solid #89b4fa',
+                  color: '#89b4fa',
+                  fontSize: '11.5px',
+                }}
+              >
+                <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                <span>正在根据选区代码与工程上下文调用 DeepSeek 进行四层深度剖析...</span>
+              </div>
+            )}
+
             {filteredCards.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {filteredCards.map((card) => {
@@ -229,10 +262,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           {card.perspective.toUpperCase()} · {card.title}
                         </span>
 
-                        <span style={{ fontSize: '10px', color: '#a6e3a1', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                          <ShieldCheck size={12} />
-                          源码依据真实
-                        </span>
+                        {card.verified ? (
+                          <span style={{ fontSize: '10px', color: '#a6e3a1', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                            <ShieldCheck size={12} />
+                            源码依据已核实
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: '10px', color: '#fab387', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                            <AlertCircle size={12} />
+                            源码依据待核对
+                          </span>
+                        )}
                       </div>
 
                       {/* One sentence summary */}
@@ -264,7 +304,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             lineHeight: '1.6',
                           }}
                         >
-                          <div style={{ whiteSpace: 'pre-wrap' }}>{card.detailed_body}</div>
+                          <MarkdownRenderer content={card.detailed_body} fontSize={12} />
                         </div>
                       )}
 
@@ -439,22 +479,27 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   key={idx}
                   style={{
                     alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                    maxWidth: '85%',
-                    background: m.role === 'user' ? '#89b4fa' : '#313244',
+                    maxWidth: '88%',
+                    background: m.role === 'user' ? '#89b4fa' : '#1e1e2e',
+                    border: m.role === 'user' ? 'none' : '1px solid #313244',
                     color: m.role === 'user' ? '#11111b' : '#cdd6f4',
                     padding: '8px 12px',
                     borderRadius: '8px',
                     fontSize: '12.5px',
                     lineHeight: '1.5',
-                    whiteSpace: 'pre-wrap',
                   }}
                 >
-                  {m.content}
+                  {m.role === 'user' ? (
+                    <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
+                  ) : (
+                    <MarkdownRenderer content={m.content} fontSize={12} />
+                  )}
                 </div>
               ))}
               {isSending && (
-                <div style={{ alignSelf: 'flex-start', color: '#a6adc8', fontSize: '11px' }}>
-                  🤖 深度模型正在思考中...
+                <div style={{ alignSelf: 'flex-start', color: '#a6adc8', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                  <span>深度模型正在思考中...</span>
                 </div>
               )}
             </div>
@@ -488,7 +533,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 type="text"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 placeholder="针对当前项目或卡片提问..."
                 style={{
                   flex: 1,
