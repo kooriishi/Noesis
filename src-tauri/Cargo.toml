@@ -49,6 +49,7 @@ members = [
     "crates/ros2",
     "crates/llmapp",
     "crates/eval",
+    "crates/linux-app",
 ]
 
 [profile.release]
