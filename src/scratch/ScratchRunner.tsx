@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Play, Terminal, CheckCircle2, XCircle, Clock, BookOpen } from 'lucide-react';
+import { Play, Terminal, CheckCircle2, XCircle, Clock, BookOpen, AlertTriangle } from 'lucide-react';
 import { RunResponse, ExerciseRecord } from '../types';
 
 interface ScratchRunnerProps {
@@ -103,6 +103,24 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             <BookOpen size={14} />
             艾宾浩斯复盘 ({dueReviews.length})
           </button>
+
+          {/* Explicit Host Process Execution Notice (A8) */}
+          <span
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontSize: '10.5px',
+              color: '#f9e2af',
+              background: 'rgba(249, 226, 175, 0.1)',
+              border: '1px solid rgba(249, 226, 175, 0.3)',
+              borderRadius: '4px',
+              padding: '2px 6px',
+            }}
+          >
+            <AlertTriangle size={11} />
+            本地直接执行，仅运行自己信任的代码
+          </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -122,7 +140,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               >
                 <option value="javascript">JavaScript (Node)</option>
                 <option value="typescript">TypeScript (ts-node)</option>
-                <option value="python">Python 3</option>
+                <option value="python">Python 3 (自动探测 python3/python/py)</option>
               </select>
 
               <button
@@ -143,7 +161,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                 }}
               >
                 <Play size={13} />
-                {isRunning ? '执行中...' : '运行'}
+                {isRunning ? '执行中 (30s 超时保护)...' : '运行'}
               </button>
             </>
           )}
@@ -167,8 +185,14 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
       {/* Runner Body */}
       {activeTab === 'scratch' ? (
         <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', overflow: 'hidden' }}>
-          {/* Scratchpad editor */}
-          <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid #313244', height: '100%' }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              borderRight: '1px solid #313244',
+              height: '100%',
+            }}
+          >
             <textarea
               value={code}
               onChange={(e) => setCode(e.target.value)}
@@ -187,17 +211,48 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             />
           </div>
 
-          {/* Execution Output */}
-          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#11111b', padding: '10px', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-              <span style={{ fontSize: '11px', color: '#6c7086', fontWeight: 600 }}>子进程执行结果</span>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              height: '100%',
+              background: '#11111b',
+              padding: '10px',
+              overflowY: 'auto',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '6px',
+              }}
+            >
+              <span style={{ fontSize: '11px', color: '#6c7086', fontWeight: 600 }}>
+                子进程执行结果 (30s 超时自动终止 · 1MB 输出上限)
+              </span>
               {result && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '10.5px' }}>
-                  <span style={{ color: result.success ? '#a6e3a1' : '#f38ba8', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  <span
+                    style={{
+                      color: result.success ? '#a6e3a1' : '#f38ba8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                    }}
+                  >
                     {result.success ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
                     退出码: {result.exit_code}
                   </span>
-                  <span style={{ color: '#a6adc8', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  <span
+                    style={{
+                      color: '#a6adc8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                    }}
+                  >
                     <Clock size={12} />
                     {result.duration_ms} ms
                   </span>
@@ -219,24 +274,56 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                 whiteSpace: 'pre-wrap',
               }}
             >
-              {result ? (result.stdout || result.stderr || '(程序无输出)') : '点击右上角「运行」执行当前脚本...'}
+              {result
+                ? result.stdout || result.stderr || '(程序无输出)'
+                : '点击右上角「运行」执行当前脚本...'}
             </pre>
           </div>
         </div>
       ) : (
-        /* Reviews tab */
         <div style={{ flex: 1, padding: '12px', overflowY: 'auto' }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4', marginBottom: '8px' }}>
             📅 今日艾宾浩斯间隔复盘题目 ({dueReviews.length})
           </div>
           {dueReviews.length > 0 ? (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                gap: '10px',
+              }}
+            >
               {dueReviews.map((rev) => (
-                <div key={rev.id} style={{ background: '#181825', padding: '10px', borderRadius: '6px', border: '1px solid #313244' }}>
-                  <div style={{ fontSize: '10px', color: '#f9e2af', fontWeight: 'bold' }}>{rev.exercise_type}</div>
-                  <div style={{ fontSize: '12px', color: '#cdd6f4', marginTop: '4px' }}>{rev.question}</div>
-                  <pre style={{ background: '#11111b', padding: '6px', borderRadius: '4px', fontSize: '10.5px', color: '#89b4fa', margin: '6px 0' }}>{rev.snippet}</pre>
-                  <div style={{ fontSize: '11px', color: '#a6adc8' }}>参考依据: {rev.file_path}</div>
+                <div
+                  key={rev.id}
+                  style={{
+                    background: '#181825',
+                    padding: '10px',
+                    borderRadius: '6px',
+                    border: '1px solid #313244',
+                  }}
+                >
+                  <div style={{ fontSize: '10px', color: '#f9e2af', fontWeight: 'bold' }}>
+                    {rev.exercise_type}
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#cdd6f4', marginTop: '4px' }}>
+                    {rev.question}
+                  </div>
+                  <pre
+                    style={{
+                      background: '#11111b',
+                      padding: '6px',
+                      borderRadius: '4px',
+                      fontSize: '10.5px',
+                      color: '#89b4fa',
+                      margin: '6px 0',
+                    }}
+                  >
+                    {rev.snippet}
+                  </pre>
+                  <div style={{ fontSize: '11px', color: '#a6adc8' }}>
+                    参考依据: {rev.file_path}
+                  </div>
                 </div>
               ))}
             </div>

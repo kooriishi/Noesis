@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  AlertTriangle,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { CodeEditor } from '../editor/CodeEditor';
@@ -19,6 +20,7 @@ import { ProjectSidebar } from '../sidebar-project/ProjectSidebar';
 import { AiSidebar } from '../sidebar-ai/AiSidebar';
 import { ScratchRunner } from '../scratch/ScratchRunner';
 import { SettingsModal } from './SettingsModal';
+import { extractJsonObject } from '../utils/llmJson';
 import {
   FileNode,
   ProjectMap,
@@ -26,6 +28,7 @@ import {
   RewordingResult,
   ConfusionMark,
   LlmConfig,
+  SystemStatus,
   ChatMessage,
   OutboundPreview,
   RunResponse,
@@ -46,10 +49,12 @@ const DEFAULT_SETTINGS: AppSettings = {
 const DEFAULT_LLM: LlmConfig = {
   provider: 'deepseek',
   api_url: 'https://api.deepseek.com',
-  api_key: 'sk-136dbd0231f54d29820ef0a7f731550c',
+  api_key: '',
   model: 'deepseek-chat',
   temperature: 0.3,
   max_tokens: 4096,
+  has_api_key: false,
+  api_key_masked: '',
 };
 
 export const ShellLayout: React.FC = () => {
@@ -64,25 +69,34 @@ export const ShellLayout: React.FC = () => {
   });
 
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-
-  // LLM Config State (persisted in localStorage)
-  const [llmConfig, setLlmConfig] = useState<LlmConfig>(() => {
-    try {
-      const saved = localStorage.getItem('noesis_llm_config');
-      return saved ? { ...DEFAULT_LLM, ...JSON.parse(saved) } : DEFAULT_LLM;
-    } catch {
-      return DEFAULT_LLM;
-    }
-  });
+  const [llmConfig, setLlmConfig] = useState<LlmConfig>(DEFAULT_LLM);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus>({ db_degraded: false });
 
   const updateSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     localStorage.setItem('noesis_settings', JSON.stringify(newSettings));
   };
 
-  const updateLlmConfig = (newConfig: LlmConfig) => {
-    setLlmConfig(newConfig);
-    localStorage.setItem('noesis_llm_config', JSON.stringify(newConfig));
+  const updateLlmConfig = async (newConfig: LlmConfig) => {
+    // Never write api_key to localStorage (A1)
+    localStorage.removeItem('noesis_llm_config');
+    try {
+      const updated = await ApiService.setLlmConfig(newConfig);
+      setLlmConfig(updated);
+    } catch (err) {
+      console.error('Failed to update LLM config:', err);
+      setLlmConfig({ ...newConfig, api_key: '' });
+    }
+  };
+
+  const handleClearApiKey = async () => {
+    localStorage.removeItem('noesis_llm_config');
+    try {
+      const updated = await ApiService.clearApiKey();
+      setLlmConfig(updated);
+    } catch (err) {
+      console.error('Failed to clear API key:', err);
+    }
   };
 
   // Resizable Panels State
@@ -113,6 +127,12 @@ export const ShellLayout: React.FC = () => {
 
   // AI & Reading State
   const [cards, setCards] = useState<ExplanationCard[]>([]);
+  const [explainError, setExplainError] = useState<string | null>(null);
+  const [lastExplainSelection, setLastExplainSelection] = useState<{
+    snippet: string;
+    startLine: number;
+    endLine: number;
+  } | null>(null);
   const [confusionMarks, setConfusionMarks] = useState<ConfusionMark[]>([]);
   const [activeRewording, setActiveRewording] = useState<RewordingResult | null>(null);
   const [dueReviews, setDueReviews] = useState<ExerciseRecord[]>([]);
@@ -195,8 +215,12 @@ export const ShellLayout: React.FC = () => {
     localStorage.setItem('noesis_right_width', '380');
   };
 
-  // Load project on mount
+  // Load initial state on mount
   useEffect(() => {
+    // Purge any legacy localStorage LLM key (A1)
+    localStorage.removeItem('noesis_llm_config');
+    ApiService.getLlmConfig().then(setLlmConfig).catch(console.error);
+    ApiService.getSystemStatus().then(setSystemStatus).catch(console.error);
     handleOpenProject('./');
     loadConfusionMarks();
     loadDueReviews();
@@ -212,7 +236,6 @@ export const ShellLayout: React.FC = () => {
 
       await handleTriggerIndex();
 
-      // Open first code file
       const first = findFirstFile(tree);
       if (first) {
         await handleOpenFile(first.path);
@@ -233,7 +256,6 @@ export const ShellLayout: React.FC = () => {
     return null;
   };
 
-  // Open file in tabs (support multiple opened files!)
   const handleOpenFile = async (filePath: string) => {
     const existing = tabs.find((t) => t.path === filePath);
     if (existing) {
@@ -266,7 +288,9 @@ export const ShellLayout: React.FC = () => {
     if (!targetTab) return;
 
     if (targetTab.isDirty) {
-      const confirmClose = window.confirm(`文件 "${targetTab.name}" 有未保存的修改，关闭将丢失这些修改。确定关闭吗？`);
+      const confirmClose = window.confirm(
+        `文件 "${targetTab.name}" 有未保存的修改，关闭将丢失这些修改。确定关闭吗？`
+      );
       if (!confirmClose) return;
     }
 
@@ -291,12 +315,15 @@ export const ShellLayout: React.FC = () => {
     );
   };
 
-  const handleSaveActiveFile = async () => {
+  const handleSaveActiveFile = async (latestContent?: string) => {
     if (!activeTab) return;
+    const contentToSave = latestContent !== undefined ? latestContent : activeTab.content;
     try {
-      await ApiService.saveFile(activeTab.path, activeTab.content);
+      await ApiService.saveFile(activeTab.path, contentToSave);
       setTabs((prev) =>
-        prev.map((t) => (t.path === activeTab.path ? { ...t, isDirty: false } : t))
+        prev.map((t) =>
+          t.path === activeTab.path ? { ...t, content: contentToSave, isDirty: false } : t
+        )
       );
     } catch (err: any) {
       alert(`保存失败: ${err}`);
@@ -320,9 +347,11 @@ export const ShellLayout: React.FC = () => {
     setRightCollapsed(false);
     setActiveSidebarTab('cards');
     setIsExplaining(true);
+    setExplainError(null);
+    setLastExplainSelection({ snippet, startLine, endLine });
 
     try {
-      // 1. Generate local 4-perspective cards with verified citation check from Rust
+      // 1. Generate local 4-perspective template cards with source_matches check from Rust
       const generatedCards = await ApiService.explainCode(
         activeTab.path,
         snippet,
@@ -330,11 +359,14 @@ export const ShellLayout: React.FC = () => {
         endLine
       );
 
-      // 2. If DeepSeek API key is present, perform deep contextual multi-perspective analysis
-      if (llmConfig.api_key.trim().length > 5) {
+      const hasKey = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama');
+
+      // 2. If API key is configured, perform deep contextual multi-perspective analysis
+      if (hasKey && !llmConfig.offline_mode) {
         let systemPrompt = await ApiService.getExpertSystemPrompt();
         if (!systemPrompt || systemPrompt.trim().length === 0) {
-          systemPrompt = '你是一位精通底层原理与工程架构的 NOESIS 代码深度导读专家。请严格按照【整体】、【逻辑】、【语法】、【原理】四层正交视角给出详尽透视。';
+          systemPrompt =
+            '你是一位精通底层原理与工程架构的 NOESIS 代码深度导读专家。请严格按照【整体】、【逻辑】、【语法】、【原理】四层正交视角给出详尽透视。';
         }
 
         const userPrompt = `请针对以下代码选区进行深度导读：
@@ -381,10 +413,10 @@ ${snippet}
             { role: 'user', content: userPrompt },
           ]);
 
-          // Attempt to extract structured JSON from response
-          const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
+          // Extract JSON via code fence or balanced braces (A4 - never greedy regex)
+          const extracted = extractJsonObject<Record<string, any>>(aiResponse);
+          if (extracted.ok) {
+            const parsed = extracted.data;
             const perspectives: Array<'overall' | 'logic' | 'syntax' | 'principle'> = [
               'overall',
               'logic',
@@ -392,6 +424,7 @@ ${snippet}
               'principle',
             ];
 
+            let anyUpdated = false;
             for (const p of perspectives) {
               if (parsed[p]) {
                 const targetCard = generatedCards.find((c) => c.perspective === p);
@@ -402,29 +435,45 @@ ${snippet}
                     targetCard.key_bullets = parsed[p].bullets;
                   }
                   if (parsed[p].detail) targetCard.detailed_body = parsed[p].detail;
+                  targetCard.is_template = false;
+                  anyUpdated = true;
                 }
               }
             }
-          } else {
-            // If model returned plain text, attach it to overall card
-            if (generatedCards.length > 0) {
-              generatedCards[0].detailed_body = `### DeepSeek 深度解析\n\n${aiResponse}\n\n---\n${generatedCards[0].detailed_body}`;
+
+            if (!anyUpdated) {
+              setExplainError('AI 返回的 JSON 不包含标准四层视角字段，当前仅显示本地模板占位卡。');
             }
+          } else {
+            setExplainError(`AI 输出结构解析失败 (${extracted.error})，当前回退显示本地模板占位卡。`);
           }
         } catch (chatErr: any) {
-          console.warn('DeepSeek query failed, falling back to verified local cards:', chatErr);
+          // Explicit error banner instead of silent console.warn (A4)
+          setExplainError(`AI 解读请求失败：${chatErr?.message || String(chatErr)}`);
         }
       } else {
-        if (generatedCards.length > 0) {
-          generatedCards[0].detailed_body = `> [!NOTE]\n> 当前未配置 DeepSeek API Key，已为您展示本地离线结构卡片。在右侧「模型/安全」面板或按 \`Ctrl+,\` 配置 API Key 后，可实时获取针对该代码片段的原理深度剖析。\n\n${generatedCards[0].detailed_body}`;
-        }
+        setExplainError(
+          llmConfig.offline_mode
+            ? '当前处于完全离线模式，展示本地模板占位卡片。'
+            : '当前未配置模型 API Key，展示本地模板占位卡片。请在「设置」中配置密钥后重试。'
+        );
       }
 
       setCards(generatedCards);
     } catch (err: any) {
-      alert(`解读生成遇到异常: ${err?.message || err}`);
+      setExplainError(`解读生成遇到异常: ${err?.message || String(err)}`);
     } finally {
       setIsExplaining(false);
+    }
+  };
+
+  const handleRetryExplain = () => {
+    if (lastExplainSelection) {
+      handleExplainSelection(
+        lastExplainSelection.snippet,
+        lastExplainSelection.startLine,
+        lastExplainSelection.endLine
+      );
     }
   };
 
@@ -447,8 +496,9 @@ ${snippet}
         category
       );
 
-      // If DeepSeek API key is present, query DeepSeek with specific pedagogical降维strategy
-      if (llmConfig.api_key.trim().length > 5) {
+      const hasKey = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama');
+
+      if (hasKey && !llmConfig.offline_mode) {
         const prompt = `用户在阅读文件 "${activeTab.path}" 第 ${startLine}-${endLine} 行代码时，针对【${category}】视角标记了「看不懂」：
 \`\`\`${activeTab.language}
 ${snippet}
@@ -471,21 +521,32 @@ ${snippet}
         try {
           const aiResponse = await ApiService.sendLlmChat(llmConfig, [
             { role: 'system', content: '你是一位精通启发式教学的代码深度导读专家。' },
-            { role: 'user', content: prompt }
+            { role: 'user', content: prompt },
           ]);
-          const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
+          const extracted = extractJsonObject<Record<string, any>>(aiResponse);
+          if (extracted.ok) {
+            const parsed = extracted.data;
             rewording = {
+              mark_id: rewording.mark_id,
               original_category: category,
               analogy: parsed.analogy || rewording.analogy,
               minimal_example: parsed.minimal_example || rewording.minimal_example,
               prerequisite_concept: parsed.prerequisite_concept || rewording.prerequisite_concept,
               guidance: parsed.guidance || rewording.guidance,
+              is_template: false,
             };
+
+            // Persist AI rewording into SQLite marks table (A6)
+            if (rewording.mark_id) {
+              await ApiService.updateConfusionMarkExplanation(
+                rewording.mark_id,
+                JSON.stringify(rewording),
+                llmConfig.model
+              );
+            }
           }
-        } catch (chatErr) {
-          console.warn('DeepSeek rewording failed, using baseline:', chatErr);
+        } catch (chatErr: any) {
+          setExplainError(`「看不懂」AI 重讲请求失败：${chatErr?.message || String(chatErr)}`);
         }
       }
 
@@ -536,6 +597,8 @@ ${snippet}
     alert(`卡片 [${cardId}] 反馈已记录: [${type}]。已录入本地评测基线！`);
   };
 
+  const isKeyConfigured = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5);
+
   return (
     <div
       style={{
@@ -569,7 +632,14 @@ ${snippet}
           <button
             onClick={() => setLeftCollapsed(!leftCollapsed)}
             title={leftCollapsed ? '展开左侧工作区' : '折叠左侧工作区'}
-            style={{ background: 'transparent', border: 'none', color: '#a6adc8', cursor: 'pointer', padding: '3px', display: 'flex' }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: '#a6adc8',
+              cursor: 'pointer',
+              padding: '3px',
+              display: 'flex',
+            }}
           >
             {leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
@@ -603,7 +673,7 @@ ${snippet}
         {/* Center: Save / Sandbox */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button
-            onClick={handleSaveActiveFile}
+            onClick={() => handleSaveActiveFile()}
             disabled={!activeTab}
             title="保存当前文件 (Ctrl+S)"
             style={{
@@ -690,7 +760,14 @@ ${snippet}
           <button
             onClick={() => setRightCollapsed(!rightCollapsed)}
             title={rightCollapsed ? '展开右侧 AI 导读' : '折叠右侧 AI 导读'}
-            style={{ background: 'transparent', border: 'none', color: '#a6adc8', cursor: 'pointer', padding: '3px', display: 'flex' }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: '#a6adc8',
+              cursor: 'pointer',
+              padding: '3px',
+              display: 'flex',
+            }}
           >
             {rightCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
           </button>
@@ -700,7 +777,15 @@ ${snippet}
       {/* Main 3-Column Work Area with Resizers */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
         {/* Left: Project Explorer & Map */}
-        <div style={{ width: `${leftWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden', display: leftCollapsed ? 'none' : 'block' }}>
+        <div
+          style={{
+            width: `${leftWidth}px`,
+            height: '100%',
+            flexShrink: 0,
+            overflow: 'hidden',
+            display: leftCollapsed ? 'none' : 'block',
+          }}
+        >
           <ProjectSidebar
             currentProject={currentProject}
             projectMap={projectMap}
@@ -734,7 +819,16 @@ ${snippet}
         )}
 
         {/* Center: Multi-Tab Editor + Bottom Docked Scratch Runner */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', minWidth: '200px' }}>
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            overflow: 'hidden',
+            minWidth: '200px',
+          }}
+        >
           {/* Multi-File Tab Bar */}
           <div
             style={{
@@ -899,15 +993,26 @@ ${snippet}
         )}
 
         {/* Right: AI Guidance, 4-Perspective Cards, Clarifications, and Chat */}
-        <div style={{ width: `${rightWidth}px`, height: '100%', flexShrink: 0, overflow: 'hidden', display: rightCollapsed ? 'none' : 'block' }}>
+        <div
+          style={{
+            width: `${rightWidth}px`,
+            height: '100%',
+            flexShrink: 0,
+            overflow: 'hidden',
+            display: rightCollapsed ? 'none' : 'block',
+          }}
+        >
           <AiSidebar
             cards={cards}
+            explainError={explainError}
+            onRetryExplain={handleRetryExplain}
             confusionMarks={confusionMarks}
             activeRewording={activeRewording}
             llmConfig={llmConfig}
             isExplaining={isExplaining}
             activeSidebarTab={activeSidebarTab}
             onUpdateLlmConfig={updateLlmConfig}
+            onClearApiKey={handleClearApiKey}
             onSendChat={handleSendChat}
             onPreviewOutbound={handlePreviewOutbound}
             onMarkCardFeedback={handleMarkCardFeedback}
@@ -935,9 +1040,40 @@ ${snippet}
             <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#a6e3a1' }} />
             Rust 内核 (Tauri 2) 在线
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: llmConfig.api_key.trim().length > 5 ? '#a6e3a1' : '#f9e2af' }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: llmConfig.api_key.trim().length > 5 ? '#a6e3a1' : '#f9e2af' }} />
-            {llmConfig.api_key.trim().length > 5 ? `DeepSeek: ${llmConfig.model}` : 'DeepSeek: 未配置密钥 (离线模式)'}
+          {systemStatus.db_degraded && (
+            <span
+              title={systemStatus.db_error || '数据库降级为内存模式'}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                color: '#f38ba8',
+                fontWeight: 600,
+              }}
+            >
+              <AlertTriangle size={12} />
+              数据库不可用，学习记录不会保存
+            </span>
+          )}
+          <span
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              color: isKeyConfigured ? '#a6e3a1' : '#f9e2af',
+            }}
+          >
+            <span
+              style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                background: isKeyConfigured ? '#a6e3a1' : '#f9e2af',
+              }}
+            />
+            {isKeyConfigured
+              ? `${llmConfig.provider}: ${llmConfig.model} (${llmConfig.api_key_masked || '已配置密钥'})`
+              : `${llmConfig.provider}: 未配置密钥 (模板模式)`}
           </span>
         </div>
 
@@ -958,6 +1094,7 @@ ${snippet}
         onUpdateSettings={updateSettings}
         llmConfig={llmConfig}
         onUpdateLlmConfig={updateLlmConfig}
+        onClearApiKey={handleClearApiKey}
         onResetLayout={resetLayout}
       />
     </div>

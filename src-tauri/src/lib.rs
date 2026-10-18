@@ -1,23 +1,45 @@
-use noesis_indexer::{CodeIndexer, ProjectMap};
-use noesis_learn::{
-    ExplanationCard, LearnEngine, RewordingResult,
+use noesis_indexer::{CodeIndexer, DomainAdapter, ProjectMap};
+use noesis_learn::{ExplanationCard, LearnEngine, RewordingResult};
+use noesis_llm::{
+    ChatMessage, ConnectionTestResult, CredentialStore, LlmConfig, LlmGateway, OutboundPreview,
 };
-use noesis_llm::{ChatMessage, LlmConfig, LlmGateway, OutboundPreview};
+use noesis_llmapp::LlmAppAdapter;
 use noesis_project::{FileContentPayload, FileNode, ProjectManager};
+use noesis_ros2::Ros2Adapter;
 use noesis_runner::{CodeRunner, RunRequest, RunResponse};
-use noesis_store::{ConfusionMark, DbStore, ExerciseRecord};
+use noesis_store::{
+    ConfusionMark, DbStore, ExerciseRecord, GraphSymbol, ReadingProgressRecord, SymbolNeighborhood,
+};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
 const EXPERT_SYSTEM_PROMPT: &str = include_str!("../../prompts/code_guide_expert.system.md");
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatus {
+    pub db_degraded: bool,
+    pub db_error: Option<String>,
+}
+
 pub struct AppState {
     pub project_manager: Mutex<Option<ProjectManager>>,
     pub project_map: Mutex<Option<ProjectMap>>,
     pub store: DbStore,
+    pub db_degraded: bool,
+    pub db_error: Option<String>,
+    pub credentials: CredentialStore,
     pub llm: LlmGateway,
     pub indexer: CodeIndexer,
+}
+
+#[tauri::command]
+fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, String> {
+    Ok(SystemStatus {
+        db_degraded: state.db_degraded,
+        db_error: state.db_error.clone(),
+    })
 }
 
 #[tauri::command]
@@ -26,12 +48,60 @@ fn get_expert_system_prompt() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_llm_config(state: State<'_, AppState>) -> Result<LlmConfig, String> {
+    Ok(state.credentials.get_config_view())
+}
+
+#[tauri::command]
+fn set_llm_config(config: LlmConfig, state: State<'_, AppState>) -> Result<LlmConfig, String> {
+    state
+        .credentials
+        .update_config(config)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<LlmConfig, String> {
+    state
+        .credentials
+        .set_api_key(&api_key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_api_key(state: State<'_, AppState>) -> Result<LlmConfig, String> {
+    state
+        .credentials
+        .clear_api_key()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn test_llm_connection(
+    config: LlmConfig,
+    state: State<'_, AppState>,
+) -> Result<ConnectionTestResult, String> {
+    let effective = state.credentials.resolve_effective_config(&config);
+    Ok(state.llm.test_connection(&effective).await)
+}
+
+#[tauri::command]
 fn open_project(path: String, state: State<'_, AppState>) -> Result<FileNode, String> {
     let pm = ProjectManager::new(&path).map_err(|e| e.to_string())?;
-    let tree = pm.build_tree(6).map_err(|e| e.to_string())?;
+    let tree = pm.build_tree(2).map_err(|e| e.to_string())?;
     let mut guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     *guard = Some(pm);
     Ok(tree)
+}
+
+#[tauri::command]
+fn list_project_dir(rel_dir: String, state: State<'_, AppState>) -> Result<Vec<FileNode>, String> {
+    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+    if let Some(pm) = pm_guard.as_ref() {
+        pm.list_dir(&rel_dir).map_err(|e| e.to_string())
+    } else {
+        Err("尚未打开任何工程".to_string())
+    }
 }
 
 #[tauri::command]
@@ -67,35 +137,21 @@ fn save_file(path: String, content: String, state: State<'_, AppState>) -> Resul
 
 #[tauri::command]
 fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
-    let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-    let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+    let root_path = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+        pm.root_path().to_path_buf()
+    };
 
-    // Gather valid source code files for indexing (exclude plaintext/markdown/json from code symbols)
-    let mut files_to_index = Vec::new();
-    let tree = pm.build_tree(10).map_err(|e| e.to_string())?;
+    let ros2_adapter = Ros2Adapter::new();
+    let llm_adapter = LlmAppAdapter::new();
+    let adapters: [&dyn DomainAdapter; 2] = [&ros2_adapter, &llm_adapter];
 
-    fn collect_files(node: &FileNode, pm: &ProjectManager, acc: &mut Vec<(String, String, String)>) {
-        if node.is_dir {
-            if let Some(children) = &node.children {
-                for c in children {
-                    collect_files(c, pm, acc);
-                }
-            }
-        } else if let Some(lang) = &node.language {
-            let code_langs = [
-                "rust", "typescript", "javascript", "python",
-                "go", "java", "csharp", "kotlin", "swift", "c", "cpp", "php",
-            ];
-            if code_langs.contains(&lang.as_str()) {
-                if let Ok(payload) = pm.read_file(&node.path) {
-                    acc.push((node.path.clone(), payload.content, lang.clone()));
-                }
-            }
-        }
-    }
+    let (map, _report) = state
+        .indexer
+        .index_workspace(&root_path, &state.store, &adapters)
+        .map_err(|e| e.to_string())?;
 
-    collect_files(&tree, pm, &mut files_to_index);
-    let map = state.indexer.compute_project_map(&files_to_index);
     let mut map_guard = state.project_map.lock().map_err(|e| e.to_string())?;
     *map_guard = Some(map.clone());
 
@@ -104,8 +160,86 @@ fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
 
 #[tauri::command]
 fn get_project_map(state: State<'_, AppState>) -> Result<Option<ProjectMap>, String> {
-    let map = state.project_map.lock().map_err(|e| e.to_string())?.clone();
+    let map = state
+        .project_map
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
     Ok(map)
+}
+
+#[tauri::command]
+fn set_reading_step_status(
+    step_id: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+        pm.normalized_root()
+    };
+    state
+        .store
+        .set_reading_progress(&project_id, &step_id, &status)
+        .map_err(|e| e.to_string())?;
+
+    // Also update in-memory project_map reading_route status so subsequent get_project_map reflects it immediately
+    if let Ok(mut map_guard) = state.project_map.lock() {
+        if let Some(ref mut map) = *map_guard {
+            for step in &mut map.reading_route {
+                if step.id == step_id || step.file_path == step_id {
+                    step.status = status.clone();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_reading_progress(state: State<'_, AppState>) -> Result<Vec<ReadingProgressRecord>, String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+        pm.normalized_root()
+    };
+    state
+        .store
+        .get_reading_progress(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_symbol_neighborhood(
+    symbol_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<SymbolNeighborhood>, String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+        pm.normalized_root()
+    };
+    state
+        .store
+        .get_symbol_with_neighbors(&project_id, &symbol_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_project_symbols(
+    file_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<GraphSymbol>, String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
+        pm.normalized_root()
+    };
+    state
+        .store
+        .list_project_symbols(&project_id, file_path.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -117,7 +251,7 @@ fn explain_code(
     state: State<'_, AppState>,
 ) -> Result<Vec<ExplanationCard>, String> {
     let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-    let verified = if let Some(pm) = pm_guard.as_ref() {
+    let source_matches = if let Some(pm) = pm_guard.as_ref() {
         if let Ok(payload) = pm.read_file(&file_path) {
             LearnEngine::verify_source_reference(&payload.content, start_line, end_line, &snippet)
         } else {
@@ -131,7 +265,7 @@ fn explain_code(
         &snippet,
         start_line,
         end_line,
-        verified,
+        source_matches,
     ))
 }
 
@@ -144,26 +278,49 @@ fn mark_confusion(
     category: String,
     state: State<'_, AppState>,
 ) -> Result<RewordingResult, String> {
-    let rewording = LearnEngine::handle_confusion_mark(&category, &snippet);
+    let mut rewording = LearnEngine::handle_confusion_mark(&category, &snippet);
     let project_id = {
         let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
         pm_guard.as_ref().map(|pm| pm.normalized_root())
     };
 
+    let mark_id = format!(
+        "mark-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        start_line
+    );
+    rewording.mark_id = Some(mark_id.clone());
+
     let mark = ConfusionMark {
-        id: format!("mark-{}-{}", chrono::Utc::now().timestamp_millis(), start_line),
+        id: mark_id,
         project_id,
         file_path,
         line_start: start_line,
         line_end: end_line,
         code_snippet: snippet,
-        category,
+        category: category.clone(),
+        confusion_type: Some(category),
         explanation: Some(rewording.analogy.clone()),
+        ai_explanation: None,
+        model: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
 
     let _ = state.store.save_mark(&mark);
     Ok(rewording)
+}
+
+#[tauri::command]
+fn update_confusion_mark_explanation(
+    id: String,
+    ai_explanation: String,
+    model: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .store
+        .update_mark_ai_explanation(&id, &ai_explanation, &model)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -187,10 +344,11 @@ fn preview_outbound(
     messages: Vec<ChatMessage>,
     state: State<'_, AppState>,
 ) -> Result<OutboundPreview, String> {
+    let effective = state.credentials.resolve_effective_config(&config);
     state
         .llm
         .filter()
-        .inspect_outbound(&config, &messages)
+        .inspect_outbound(&effective, &messages)
         .map_err(|e| e.to_string())
 }
 
@@ -200,25 +358,10 @@ async fn send_llm_chat(
     messages: Vec<ChatMessage>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // 1. Verify outbound content limits and sanitize
-    let _ = state
-        .llm
-        .filter()
-        .inspect_outbound(&config, &messages)
-        .map_err(|e| e.to_string())?;
-
-    // 2. Validate that no message carries sensitive configuration files
-    for m in &messages {
-        for word in m.content.split_whitespace() {
-            if word.contains(".env") || word.contains("id_rsa") || word.contains(".pem") {
-                let _ = state.llm.filter().check_file_path_allowed(word).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-
+    let effective = state.credentials.resolve_effective_config(&config);
     state
         .llm
-        .send_chat(&config, messages)
+        .send_chat(&effective, messages)
         .await
         .map_err(|e| e.to_string())
 }
@@ -239,19 +382,36 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let app_data = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| PathBuf::from("."));
             let _ = std::fs::create_dir_all(&app_data);
             let db_path = app_data.join("noesis_local.db");
 
-            let store = DbStore::open(&db_path).unwrap_or_else(|err| {
-                eprintln!("Warning: Failed to open AppData database ({:?}), falling back to memory: {}", db_path, err);
-                DbStore::in_memory().expect("In-memory database initialization failed")
-            });
+            let (store, db_degraded, db_error) = match DbStore::open(&db_path) {
+                Ok(s) => (s, false, None),
+                Err(err) => {
+                    let msg = format!(
+                        "数据库打开失败 ({:?}): {}，当前学习记录仅保存在内存中",
+                        db_path, err
+                    );
+                    eprintln!("Warning: {}", msg);
+                    let mem = DbStore::in_memory()
+                        .expect("In-memory database initialization failed");
+                    (mem, true, Some(msg))
+                }
+            };
+
+            let credentials = CredentialStore::new(Some(app_data));
 
             let state = AppState {
                 project_manager: Mutex::new(None),
                 project_map: Mutex::new(None),
                 store,
+                db_degraded,
+                db_error,
+                credentials,
                 llm: LlmGateway::new(),
                 indexer: CodeIndexer::new(),
             };
@@ -260,14 +420,26 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_system_status,
+            get_llm_config,
+            set_llm_config,
+            set_api_key,
+            clear_api_key,
+            test_llm_connection,
             open_project,
+            list_project_dir,
             get_project_tree,
             read_file,
             save_file,
             index_project,
             get_project_map,
+            set_reading_step_status,
+            get_reading_progress,
+            get_symbol_neighborhood,
+            list_project_symbols,
             explain_code,
             mark_confusion,
+            update_confusion_mark_explanation,
             get_confusion_marks,
             preview_outbound,
             send_llm_chat,

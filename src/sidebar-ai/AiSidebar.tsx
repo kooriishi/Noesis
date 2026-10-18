@@ -11,6 +11,9 @@ import {
   Eye,
   Sliders,
   Loader2,
+  RefreshCw,
+  Trash2,
+  Wifi,
 } from 'lucide-react';
 import {
   ExplanationCard,
@@ -20,17 +23,22 @@ import {
   LlmConfig,
   ChatMessage,
   OutboundPreview,
+  ConnectionTestResult,
 } from '../types';
+import { ApiService } from '../services/api';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
 
 interface AiSidebarProps {
   cards: ExplanationCard[];
+  explainError?: string | null;
+  onRetryExplain?: () => void;
   confusionMarks: ConfusionMark[];
   activeRewording: RewordingResult | null;
   llmConfig: LlmConfig;
   isExplaining?: boolean;
   activeSidebarTab?: 'cards' | 'confusion' | 'chat' | 'settings';
   onUpdateLlmConfig: (config: LlmConfig) => void;
+  onClearApiKey?: () => void;
   onSendChat: (messages: ChatMessage[]) => Promise<string>;
   onPreviewOutbound: (messages: ChatMessage[]) => Promise<OutboundPreview>;
   onMarkCardFeedback: (cardId: string, type: 'helpful' | 'too_generic' | 'error') => void;
@@ -38,23 +46,30 @@ interface AiSidebarProps {
 
 export const AiSidebar: React.FC<AiSidebarProps> = ({
   cards,
+  explainError,
+  onRetryExplain,
   confusionMarks,
   activeRewording,
   llmConfig,
   isExplaining = false,
   activeSidebarTab,
   onUpdateLlmConfig,
+  onClearApiKey,
   onSendChat,
   onPreviewOutbound,
   onMarkCardFeedback,
 }) => {
   const [activeTab, setActiveTab] = useState<'cards' | 'confusion' | 'chat' | 'settings'>('cards');
+  const [pendingKeyInput, setPendingKeyInput] = useState('');
+  const [connTestResult, setConnTestResult] = useState<ConnectionTestResult | null>(null);
+  const [isTestingConn, setIsTestingConn] = useState(false);
 
   useEffect(() => {
     if (activeSidebarTab) {
       setActiveTab(activeSidebarTab);
     }
   }, [activeSidebarTab]);
+
   const [activePerspective, setActivePerspective] = useState<PerspectiveType | 'all'>('all');
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
 
@@ -106,9 +121,37 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     }
   };
 
-  const filteredCards = activePerspective === 'all'
-    ? cards
-    : cards.filter((c) => c.perspective === activePerspective);
+  const handleSaveApiKey = () => {
+    if (!pendingKeyInput.trim()) return;
+    onUpdateLlmConfig({ ...llmConfig, api_key: pendingKeyInput.trim() });
+    setPendingKeyInput('');
+  };
+
+  const handleTestConnection = async () => {
+    setIsTestingConn(true);
+    setConnTestResult(null);
+    try {
+      const cfg = pendingKeyInput.trim()
+        ? { ...llmConfig, api_key: pendingKeyInput.trim() }
+        : llmConfig;
+      const res = await ApiService.testLlmConnection(cfg);
+      setConnTestResult(res);
+    } catch (err: any) {
+      setConnTestResult({
+        ok: false,
+        latency_ms: 0,
+        category: 'network',
+        message: err?.message || String(err),
+      });
+    } finally {
+      setIsTestingConn(false);
+    }
+  };
+
+  const filteredCards =
+    activePerspective === 'all'
+      ? cards
+      : cards.filter((c) => c.perspective === activePerspective);
 
   return (
     <div
@@ -215,7 +258,53 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 }}
               >
                 <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-                <span>正在根据选区代码与工程上下文调用 DeepSeek 进行四层深度剖析...</span>
+                <span>正在根据选区代码与工程上下文调用大模型进行四层深度剖析...</span>
+              </div>
+            )}
+
+            {/* Explicit Error Banner + Retry Button (A4) */}
+            {explainError && !isExplaining && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  padding: '10px 12px',
+                  marginBottom: '12px',
+                  borderRadius: '6px',
+                  background: 'rgba(243, 139, 168, 0.12)',
+                  border: '1px solid rgba(243, 139, 168, 0.45)',
+                  color: '#f38ba8',
+                  fontSize: '11.5px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
+                  <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                  <span>{explainError}</span>
+                </div>
+                {onRetryExplain && (
+                  <button
+                    onClick={onRetryExplain}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '4px 8px',
+                      background: '#f38ba8',
+                      color: '#11111b',
+                      border: 'none',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <RefreshCw size={12} />
+                    重试
+                  </button>
+                )}
               </div>
             )}
 
@@ -234,7 +323,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       }}
                     >
                       {/* Card Header */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                         <span
                           style={{
                             fontSize: '10.5px',
@@ -262,26 +351,78 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           {card.perspective.toUpperCase()} · {card.title}
                         </span>
 
-                        {card.verified ? (
-                          <span style={{ fontSize: '10px', color: '#a6e3a1', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                            <ShieldCheck size={12} />
-                            源码依据已核实
-                          </span>
-                        ) : (
-                          <span style={{ fontSize: '10px', color: '#fab387', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                            <AlertCircle size={12} />
-                            源码依据待核对
-                          </span>
-                        )}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {/* Explicit Template Watermark (A4) */}
+                          {card.is_template && (
+                            <span
+                              style={{
+                                fontSize: '10px',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                background: 'rgba(249, 226, 175, 0.15)',
+                                border: '1px solid rgba(249, 226, 175, 0.4)',
+                                color: '#f9e2af',
+                                fontWeight: 600,
+                              }}
+                            >
+                              模板占位，非 AI 解读
+                            </span>
+                          )}
+
+                          {/* Source Reference Match Indicator (A5) */}
+                          {card.source_matches ? (
+                            <span
+                              style={{
+                                fontSize: '10px',
+                                color: '#a6e3a1',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                              }}
+                            >
+                              <ShieldCheck size={12} />
+                              选区原文一致
+                            </span>
+                          ) : (
+                            <span
+                              style={{
+                                fontSize: '10px',
+                                color: '#fab387',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                              }}
+                            >
+                              <AlertCircle size={12} />
+                              选区原文待核对
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       {/* One sentence summary */}
-                      <div style={{ fontSize: '13px', fontWeight: 600, color: '#cdd6f4', marginTop: '8px', lineHeight: '1.4' }}>
+                      <div
+                        style={{
+                          fontSize: '13px',
+                          fontWeight: 600,
+                          color: '#cdd6f4',
+                          marginTop: '8px',
+                          lineHeight: '1.4',
+                        }}
+                      >
                         {card.one_sentence}
                       </div>
 
                       {/* 3-5 bullet points */}
-                      <ul style={{ margin: '8px 0', paddingLeft: '16px', fontSize: '12px', color: '#a6adc8', lineHeight: '1.5' }}>
+                      <ul
+                        style={{
+                          margin: '8px 0',
+                          paddingLeft: '16px',
+                          fontSize: '12px',
+                          color: '#a6adc8',
+                          lineHeight: '1.5',
+                        }}
+                      >
                         {card.key_bullets.map((b, i) => (
                           <li key={i}>{b}</li>
                         ))}
@@ -289,7 +430,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
                       {/* Source basis location */}
                       <div style={{ fontSize: '10.5px', color: '#6c7086', marginTop: '4px' }}>
-                        📍 依据: {card.source.file_path}:{card.source.line_start}-{card.source.line_end}
+                        📍 选区位置: {card.source.file_path}:{card.source.line_start}-
+                        {card.source.line_end}
                       </div>
 
                       {/* Expand Details */}
@@ -341,21 +483,45 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           <button
                             onClick={() => onMarkCardFeedback(card.id, 'helpful')}
                             title="标记有深度"
-                            style={{ background: '#313244', border: 'none', borderRadius: '4px', padding: '3px 6px', color: '#a6e3a1', fontSize: '10px', cursor: 'pointer' }}
+                            style={{
+                              background: '#313244',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 6px',
+                              color: '#a6e3a1',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                            }}
                           >
                             👍 有用
                           </button>
                           <button
                             onClick={() => onMarkCardFeedback(card.id, 'too_generic')}
                             title="标记讲得太泛"
-                            style={{ background: '#313244', border: 'none', borderRadius: '4px', padding: '3px 6px', color: '#f9e2af', fontSize: '10px', cursor: 'pointer' }}
+                            style={{
+                              background: '#313244',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 6px',
+                              color: '#f9e2af',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                            }}
                           >
                             太泛
                           </button>
                           <button
                             onClick={() => onMarkCardFeedback(card.id, 'error')}
                             title="标记有源码依据偏差"
-                            style={{ background: '#313244', border: 'none', borderRadius: '4px', padding: '3px 6px', color: '#f38ba8', fontSize: '10px', cursor: 'pointer' }}
+                            style={{
+                              background: '#313244',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '3px 6px',
+                              color: '#f38ba8',
+                              fontSize: '10px',
+                              cursor: 'pointer',
+                            }}
                           >
                             有误
                           </button>
@@ -366,10 +532,19 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 })}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '32px 12px', color: '#6c7086', fontSize: '12.5px' }}>
+              <div
+                style={{
+                  textAlign: 'center',
+                  padding: '32px 12px',
+                  color: '#6c7086',
+                  fontSize: '12.5px',
+                }}
+              >
                 <Sparkles size={32} style={{ margin: '0 auto 10px', opacity: 0.4 }} />
-                在左侧代码编辑器中选择任意代码片段，<br />
-                点击浮动气泡中的「深度解读」，<br />
+                在左侧代码编辑器中选择任意代码片段，
+                <br />
+                点击浮动气泡中的「深度解读」，
+                <br />
                 即可生成四层结构化导读卡片！
               </div>
             )}
@@ -388,12 +563,41 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   marginBottom: '14px',
                 }}
               >
-                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#f38ba8', marginBottom: '6px' }}>
-                  💡 针对「{activeRewording.original_category.toUpperCase()}」维度的换讲法
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '6px',
+                  }}
+                >
+                  <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#f38ba8' }}>
+                    💡 针对「{activeRewording.original_category.toUpperCase()}」维度的换讲法
+                  </div>
+                  {activeRewording.is_template && (
+                    <span
+                      style={{
+                        fontSize: '10px',
+                        padding: '1px 6px',
+                        borderRadius: '4px',
+                        background: 'rgba(249, 226, 175, 0.15)',
+                        color: '#f9e2af',
+                      }}
+                    >
+                      模板占位，非 AI 解读
+                    </span>
+                  )}
                 </div>
 
                 <div style={{ fontSize: '11px', color: '#f9e2af', fontWeight: 600 }}>生活类比：</div>
-                <div style={{ fontSize: '12px', color: '#cdd6f4', marginBottom: '8px', lineHeight: '1.4' }}>
+                <div
+                  style={{
+                    fontSize: '12px',
+                    color: '#cdd6f4',
+                    marginBottom: '8px',
+                    lineHeight: '1.4',
+                  }}
+                >
                   {activeRewording.analogy}
                 </div>
 
@@ -417,54 +621,134 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   {activeRewording.prerequisite_concept}
                 </div>
 
-                <div style={{ fontSize: '11px', color: '#cdd6f4', background: '#313244', padding: '6px 8px', borderRadius: '4px' }}>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#cdd6f4',
+                    background: '#313244',
+                    padding: '6px 8px',
+                    borderRadius: '4px',
+                  }}
+                >
                   🧭 建议：{activeRewording.guidance}
                 </div>
               </div>
             )}
 
-            <div style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4', marginBottom: '8px' }}>
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: 600,
+                color: '#cdd6f4',
+                marginBottom: '8px',
+              }}
+            >
               📚 卡点与「看不懂」学习档案 ({confusionMarks.length})
             </div>
 
             {confusionMarks.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {confusionMarks.map((mark) => (
-                  <div
-                    key={mark.id}
-                    style={{
-                      background: '#1e1e2e',
-                      border: '1px solid #313244',
-                      borderRadius: '6px',
-                      padding: '10px',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '10px', padding: '2px 5px', borderRadius: '3px', background: '#f38ba8', color: '#11111b', fontWeight: 'bold' }}>
-                        {mark.category}
-                      </span>
-                      <span style={{ fontSize: '10px', color: '#6c7086' }}>{mark.created_at.slice(0, 10)}</span>
-                    </div>
-
-                    <div style={{ fontSize: '11px', color: '#89b4fa', marginTop: '4px' }}>
-                      {mark.file_path}:{mark.line_start}-{mark.line_end}
-                    </div>
-
-                    <pre style={{ background: '#11111b', padding: '6px', borderRadius: '4px', fontSize: '10.5px', color: '#a6adc8', margin: '6px 0', overflowX: 'auto' }}>
-                      {mark.code_snippet}
-                    </pre>
-
-                    {mark.explanation && (
-                      <div style={{ fontSize: '11px', color: '#cdd6f4', lineHeight: '1.4' }}>
-                        {mark.explanation}
+                {confusionMarks.map((mark) => {
+                  let parsedAi: RewordingResult | null = null;
+                  if (mark.ai_explanation) {
+                    try {
+                      parsedAi = JSON.parse(mark.ai_explanation);
+                    } catch {
+                      parsedAi = null;
+                    }
+                  }
+                  return (
+                    <div
+                      key={mark.id}
+                      style={{
+                        background: '#1e1e2e',
+                        border: '1px solid #313244',
+                        borderRadius: '6px',
+                        padding: '10px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span
+                            style={{
+                              fontSize: '10px',
+                              padding: '2px 5px',
+                              borderRadius: '3px',
+                              background: '#f38ba8',
+                              color: '#11111b',
+                              fontWeight: 'bold',
+                            }}
+                          >
+                            {mark.category}
+                          </span>
+                          {mark.model && (
+                            <span style={{ fontSize: '10px', color: '#a6e3a1' }}>
+                              AI ({mark.model})
+                            </span>
+                          )}
+                        </div>
+                        <span style={{ fontSize: '10px', color: '#6c7086' }}>
+                          {mark.created_at.slice(0, 10)}
+                        </span>
                       </div>
-                    )}
-                  </div>
-                ))}
+
+                      <div style={{ fontSize: '11px', color: '#89b4fa', marginTop: '4px' }}>
+                        {mark.file_path}:{mark.line_start}-{mark.line_end}
+                      </div>
+
+                      <pre
+                        style={{
+                          background: '#11111b',
+                          padding: '6px',
+                          borderRadius: '4px',
+                          fontSize: '10.5px',
+                          color: '#a6adc8',
+                          margin: '6px 0',
+                          overflowX: 'auto',
+                        }}
+                      >
+                        {mark.code_snippet}
+                      </pre>
+
+                      {parsedAi ? (
+                        <div style={{ fontSize: '11px', color: '#cdd6f4', lineHeight: '1.45' }}>
+                          <div>
+                            <strong>类比：</strong>
+                            {parsedAi.analogy}
+                          </div>
+                          <div style={{ color: '#a6adc8', marginTop: '3px' }}>
+                            <strong>前置概念：</strong>
+                            {parsedAi.prerequisite_concept}
+                          </div>
+                        </div>
+                      ) : (
+                        mark.explanation && (
+                          <div style={{ fontSize: '11px', color: '#cdd6f4', lineHeight: '1.4' }}>
+                            {mark.explanation}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '24px 8px', color: '#6c7086', fontSize: '12px' }}>
-                目前没有未解决的代码卡点记录。<br />
+              <div
+                style={{
+                  textAlign: 'center',
+                  padding: '24px 8px',
+                  color: '#6c7086',
+                  fontSize: '12px',
+                }}
+              >
+                目前没有未解决的代码卡点记录。
+                <br />
                 随时在代码中点击「看不懂」来记录和复盘。
               </div>
             )}
@@ -473,7 +757,16 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
         {activeTab === 'chat' && (
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '10px' }}>
+            <div
+              style={{
+                flex: 1,
+                overflowY: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '10px',
+                marginBottom: '10px',
+              }}
+            >
               {chatMessages.map((m, idx) => (
                 <div
                   key={idx}
@@ -497,14 +790,22 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 </div>
               ))}
               {isSending && (
-                <div style={{ alignSelf: 'flex-start', color: '#a6adc8', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <div
+                  style={{
+                    alignSelf: 'flex-start',
+                    color: '#a6adc8',
+                    fontSize: '11px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                  }}
+                >
                   <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
                   <span>深度模型正在思考中...</span>
                 </div>
               )}
             </div>
 
-            {/* Outbound Preview Dialog if requested */}
             {previewData && (
               <div
                 style={{
@@ -516,18 +817,39 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   fontSize: '11px',
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#89b4fa', fontWeight: 'bold' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    color: '#89b4fa',
+                    fontWeight: 'bold',
+                  }}
+                >
                   <span>P0 外发安全预检 ({previewData.total_chars} 字符)</span>
-                  <button onClick={() => setPreviewData(null)} style={{ background: 'transparent', border: 'none', color: '#6c7086', cursor: 'pointer' }}>✕</button>
+                  <button
+                    onClick={() => setPreviewData(null)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#6c7086',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ✕
+                  </button>
                 </div>
                 <div style={{ color: '#a6e3a1', margin: '4px 0' }}>
-                  已安全脱敏: {previewData.contains_sanitized_tokens ? '是 (已擦除敏感密钥/内网IP)' : '未发现敏感字段'}
+                  已安全脱敏:{' '}
+                  {previewData.contains_sanitized_tokens
+                    ? '是 (已擦除敏感密钥/内网IP)'
+                    : '未发现敏感字段'}
                 </div>
-                <div style={{ color: '#6c7086', fontSize: '10px' }}>即将发往: {previewData.target_url}</div>
+                <div style={{ color: '#6c7086', fontSize: '10px' }}>
+                  即将发往: {previewData.target_url}
+                </div>
               </div>
             )}
 
-            {/* Chat Input */}
             <div style={{ display: 'flex', gap: '6px' }}>
               <input
                 type="text"
@@ -587,17 +909,40 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         {activeTab === 'settings' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div style={{ fontSize: '13px', fontWeight: 600, color: '#cdd6f4' }}>
-              模型服务与 P0 防外发安全设置
+              模型服务与安全凭据管理 (Rust 安全存储)
             </div>
 
-            <div style={{ background: '#1e1e2e', border: '1px solid #313244', borderRadius: '8px', padding: '12px' }}>
-              <label style={{ fontSize: '11px', color: '#a6adc8', display: 'block', marginBottom: '4px' }}>
+            <div
+              style={{
+                background: '#1e1e2e',
+                border: '1px solid #313244',
+                borderRadius: '8px',
+                padding: '12px',
+              }}
+            >
+              <label
+                style={{
+                  fontSize: '11px',
+                  color: '#a6adc8',
+                  display: 'block',
+                  marginBottom: '4px',
+                }}
+              >
                 模型提供方 (Provider)
               </label>
               <select
                 value={llmConfig.provider}
                 onChange={(e) => onUpdateLlmConfig({ ...llmConfig, provider: e.target.value })}
-                style={{ width: '100%', padding: '6px', background: '#313244', border: 'none', borderRadius: '4px', color: '#cdd6f4', fontSize: '12px', marginBottom: '10px' }}
+                style={{
+                  width: '100%',
+                  padding: '6px',
+                  background: '#313244',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#cdd6f4',
+                  fontSize: '12px',
+                  marginBottom: '10px',
+                }}
               >
                 <option value="deepseek">DeepSeek (官方兼容接口)</option>
                 <option value="openai">OpenAI</option>
@@ -605,18 +950,42 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 <option value="custom">公司内网自定义兼容地址</option>
               </select>
 
-              <label style={{ fontSize: '11px', color: '#a6adc8', display: 'block', marginBottom: '4px' }}>
+              <label
+                style={{
+                  fontSize: '11px',
+                  color: '#a6adc8',
+                  display: 'block',
+                  marginBottom: '4px',
+                }}
+              >
                 接口基础地址 (API URL)
               </label>
               <input
                 type="text"
                 value={llmConfig.api_url}
                 onChange={(e) => onUpdateLlmConfig({ ...llmConfig, api_url: e.target.value })}
-                placeholder="https://api.deepseek.com/v1"
-                style={{ width: '100%', padding: '6px', background: '#313244', border: 'none', borderRadius: '4px', color: '#cdd6f4', fontSize: '12px', marginBottom: '10px' }}
+                placeholder="https://api.deepseek.com"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '6px',
+                  background: '#313244',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#cdd6f4',
+                  fontSize: '12px',
+                  marginBottom: '10px',
+                }}
               />
 
-              <label style={{ fontSize: '11px', color: '#a6adc8', display: 'block', marginBottom: '4px' }}>
+              <label
+                style={{
+                  fontSize: '11px',
+                  color: '#a6adc8',
+                  display: 'block',
+                  marginBottom: '4px',
+                }}
+              >
                 模型名称 (Model)
               </label>
               <input
@@ -624,31 +993,171 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 value={llmConfig.model}
                 onChange={(e) => onUpdateLlmConfig({ ...llmConfig, model: e.target.value })}
                 placeholder="deepseek-chat"
-                style={{ width: '100%', padding: '6px', background: '#313244', border: 'none', borderRadius: '4px', color: '#cdd6f4', fontSize: '12px', marginBottom: '10px' }}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '6px',
+                  background: '#313244',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#cdd6f4',
+                  fontSize: '12px',
+                  marginBottom: '10px',
+                }}
               />
 
-              <label style={{ fontSize: '11px', color: '#a6adc8', display: 'block', marginBottom: '4px' }}>
-                API 密钥 (API Key)
+              <label
+                style={{
+                  fontSize: '11px',
+                  color: '#a6adc8',
+                  display: 'block',
+                  marginBottom: '4px',
+                }}
+              >
+                API 密钥状态:{' '}
+                <strong style={{ color: llmConfig.has_api_key ? '#a6e3a1' : '#f9e2af' }}>
+                  {llmConfig.has_api_key
+                    ? `已安全存储 (${llmConfig.api_key_masked})`
+                    : '未配置'}
+                </strong>
               </label>
-              <input
-                type="password"
-                value={llmConfig.api_key}
-                onChange={(e) => onUpdateLlmConfig({ ...llmConfig, api_key: e.target.value })}
-                placeholder="sk-..."
-                style={{ width: '100%', padding: '6px', background: '#313244', border: 'none', borderRadius: '4px', color: '#cdd6f4', fontSize: '12px' }}
-              />
+
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                <input
+                  type="password"
+                  value={pendingKeyInput}
+                  onChange={(e) => setPendingKeyInput(e.target.value)}
+                  placeholder={
+                    llmConfig.has_api_key
+                      ? '输入新密钥以覆盖现有凭据...'
+                      : '输入 sk-... 密钥存入安全存储'
+                  }
+                  style={{
+                    flex: 1,
+                    padding: '6px',
+                    background: '#313244',
+                    border: 'none',
+                    borderRadius: '4px',
+                    color: '#cdd6f4',
+                    fontSize: '12px',
+                  }}
+                />
+                <button
+                  onClick={handleSaveApiKey}
+                  disabled={!pendingKeyInput.trim()}
+                  style={{
+                    padding: '6px 10px',
+                    background: '#89b4fa',
+                    color: '#11111b',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: pendingKeyInput.trim() ? 'pointer' : 'default',
+                  }}
+                >
+                  保存密钥
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  onClick={handleTestConnection}
+                  disabled={isTestingConn}
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '4px',
+                    padding: '6px',
+                    background: '#313244',
+                    color: '#cdd6f4',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Wifi size={12} />
+                  {isTestingConn ? '测试连接中...' : '测试连接'}
+                </button>
+
+                {llmConfig.has_api_key && onClearApiKey && (
+                  <button
+                    onClick={onClearApiKey}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '6px 10px',
+                      background: 'rgba(243, 139, 168, 0.15)',
+                      color: '#f38ba8',
+                      border: '1px solid rgba(243, 139, 168, 0.35)',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Trash2 size={12} />
+                    清除密钥
+                  </button>
+                )}
+              </div>
+
+              {connTestResult && (
+                <div
+                  style={{
+                    marginTop: '8px',
+                    padding: '6px 8px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    background: connTestResult.ok
+                      ? 'rgba(166, 227, 161, 0.12)'
+                      : 'rgba(243, 139, 168, 0.12)',
+                    color: connTestResult.ok ? '#a6e3a1' : '#f38ba8',
+                  }}
+                >
+                  {connTestResult.message}
+                </div>
+              )}
             </div>
 
-            <div style={{ background: 'rgba(166, 227, 161, 0.08)', border: '1px solid rgba(166, 227, 161, 0.3)', borderRadius: '8px', padding: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#a6e3a1', fontSize: '12px', fontWeight: 'bold', marginBottom: '6px' }}>
+            <div
+              style={{
+                background: 'rgba(166, 227, 161, 0.08)',
+                border: '1px solid rgba(166, 227, 161, 0.3)',
+                borderRadius: '8px',
+                padding: '12px',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  color: '#a6e3a1',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  marginBottom: '6px',
+                }}
+              >
                 <ShieldCheck size={16} />
                 P0 级代码防外泄控制生效中
               </div>
-              <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '11px', color: '#a6adc8', lineHeight: '1.6' }}>
-                <li>严禁外发 .env、密钥证书、私钥文件</li>
-                <li>自动正则脱敏密码、IP、Access Token</li>
+              <ul
+                style={{
+                  margin: 0,
+                  paddingLeft: '16px',
+                  fontSize: '11px',
+                  color: '#a6adc8',
+                  lineHeight: '1.6',
+                }}
+              >
+                <li>API 密钥由 Rust 后端独立加密/权限管控，绝不写入 localStorage</li>
+                <li>严禁读取或外发 .env、.ssh、私钥证书等敏感文件</li>
+                <li>自动正则脱敏密码、内网 IP、Bearer Token</li>
                 <li>外发量限制：单次上限 100,000 字符</li>
-                <li>所有发送均支持发送前本地预览</li>
               </ul>
             </div>
           </div>

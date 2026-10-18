@@ -1,0 +1,21 @@
+# LLM Application Entrypoint Rules
+
+[[entrypoints]]
+id = "fastapi"
+kind = "http_route"
+patterns = ["@app.get", "@app.post", "@app.put", "@app.delete", "@router.get", "@router.post", "@router.put", "@router.delete", "FastAPI(", "APIRouter("]
+
+[[entrypoints]]
+id = "gradio_streamlit"
+kind = "ui_app"
+patterns = ["gr.Interface", "gr.ChatInterface", "gr.Blocks", "st.chat_input", "st.title", "st.set_page_config"]
+
+[[entrypoints]]
+id = "cli"
+kind = "cli_command"
+patterns = ["argparse.ArgumentParser", "@click.command", "typer.Typer", "if __name__ == \"__main__\":" , "if __name__ == '__main__':"]
+
+[[entrypoints]]
+id = "ros2_voice_llm"
+kind = "ros2_llm_node"
+patterns = ["CascadeNode", "MiniCpmRealtimeNode", "VoiceOrchestratorNode"]

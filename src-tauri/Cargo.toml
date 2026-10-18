@@ -2,7 +2,7 @@
 name = "noesis"
 version = "0.1.0"
 description = "NOESIS - Code-Learning Desktop IDE"
-authors = ["kooriishi <kooriishi@outlook.jp>"]
+authors = ["Noesis Team"]
 edition = "2021"
 
 [lib]
@@ -33,6 +33,8 @@ noesis-llm = { path = "crates/llm" }
 noesis-learn = { path = "crates/learn" }
 noesis-runner = { path = "crates/runner" }
 noesis-store = { path = "crates/store" }
+noesis-ros2 = { path = "crates/ros2" }
+noesis-llmapp = { path = "crates/llmapp" }
 
 [workspace]
 members = [
@@ -44,6 +46,8 @@ members = [
     "crates/learn",
     "crates/runner",
     "crates/store",
+    "crates/ros2",
+    "crates/llmapp",
 ]
 
 [profile.release]

@@ -8,16 +8,100 @@ import {
   RewordingResult,
   ConfusionMark,
   LlmConfig,
+  ConnectionTestResult,
+  SystemStatus,
   ChatMessage,
   OutboundPreview,
   RunRequest,
   RunResponse,
   ExerciseRecord,
+  GraphSymbol,
+  SymbolNeighborhood,
 } from '../types';
 
 const isTauriEnv = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 export const ApiService = {
+  async getSystemStatus(): Promise<SystemStatus> {
+    if (isTauriEnv()) {
+      return await invoke<SystemStatus>('get_system_status');
+    }
+    return { db_degraded: false };
+  },
+
+  async getLlmConfig(): Promise<LlmConfig> {
+    if (isTauriEnv()) {
+      return await invoke<LlmConfig>('get_llm_config');
+    }
+    return {
+      provider: 'deepseek',
+      api_url: 'https://api.deepseek.com',
+      api_key: '',
+      model: 'deepseek-chat',
+      temperature: 0.3,
+      max_tokens: 4096,
+      has_api_key: false,
+      api_key_masked: '',
+    };
+  },
+
+  async setLlmConfig(config: LlmConfig): Promise<LlmConfig> {
+    if (isTauriEnv()) {
+      return await invoke<LlmConfig>('set_llm_config', { config });
+    }
+    return {
+      ...config,
+      has_api_key: Boolean(config.api_key || config.has_api_key),
+      api_key_masked: config.api_key ? `sk-****${config.api_key.slice(-4)}` : config.api_key_masked || '',
+      api_key: '',
+    };
+  },
+
+  async setApiKey(apiKey: string): Promise<LlmConfig> {
+    if (isTauriEnv()) {
+      return await invoke<LlmConfig>('set_api_key', { apiKey });
+    }
+    return {
+      provider: 'deepseek',
+      api_url: 'https://api.deepseek.com',
+      api_key: '',
+      model: 'deepseek-chat',
+      temperature: 0.3,
+      max_tokens: 4096,
+      has_api_key: Boolean(apiKey),
+      api_key_masked: apiKey ? `sk-****${apiKey.slice(-4)}` : '',
+    };
+  },
+
+  async clearApiKey(): Promise<LlmConfig> {
+    if (isTauriEnv()) {
+      return await invoke<LlmConfig>('clear_api_key');
+    }
+    return {
+      provider: 'deepseek',
+      api_url: 'https://api.deepseek.com',
+      api_key: '',
+      model: 'deepseek-chat',
+      temperature: 0.3,
+      max_tokens: 4096,
+      has_api_key: false,
+      api_key_masked: '',
+    };
+  },
+
+  async testLlmConnection(config: LlmConfig): Promise<ConnectionTestResult> {
+    if (isTauriEnv()) {
+      return await invoke<ConnectionTestResult>('test_llm_connection', { config });
+    }
+    return {
+      ok: true,
+      status_code: 200,
+      latency_ms: 15,
+      category: 'ok',
+      message: '浏览器模拟环境连接测试正常',
+    };
+  },
+
   async selectDirectory(): Promise<string | null> {
     if (isTauriEnv()) {
       try {
@@ -42,7 +126,6 @@ export const ApiService = {
     if (isTauriEnv()) {
       return await invoke<FileNode>('open_project', { path });
     }
-    // Browser Mock for local testing
     return {
       name: 'Noesis (Demo)',
       path: '',
@@ -65,6 +148,13 @@ export const ApiService = {
         { name: 'README.md', path: 'README.md', absolute_path: `${path}/README.md`, is_dir: false, size: 1200, language: 'markdown' }
       ]
     };
+  },
+
+  async listProjectDir(relDir: string): Promise<FileNode[]> {
+    if (isTauriEnv()) {
+      return await invoke<FileNode[]>('list_project_dir', { relDir });
+    }
+    return [];
   },
 
   async getProjectTree(): Promise<FileNode | null> {
@@ -124,6 +214,26 @@ export const ApiService = {
     return null;
   },
 
+  async setReadingStepStatus(stepId: string, status: string): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke<void>('set_reading_step_status', { stepId, status });
+    }
+  },
+
+  async getSymbolNeighborhood(symbolId: string): Promise<SymbolNeighborhood | null> {
+    if (isTauriEnv()) {
+      return await invoke<SymbolNeighborhood | null>('get_symbol_neighborhood', { symbolId });
+    }
+    return null;
+  },
+
+  async listProjectSymbols(filePath?: string): Promise<GraphSymbol[]> {
+    if (isTauriEnv()) {
+      return await invoke<GraphSymbol[]>('list_project_symbols', { filePath });
+    }
+    return [];
+  },
+
   async explainCode(
     filePath: string,
     snippet: string,
@@ -147,7 +257,8 @@ export const ApiService = {
         key_bullets: ['对外暴露稳定调用接口', '规范化状态传递'],
         detailed_body: '整体深度解析正文...',
         source: { file_path: filePath, line_start: startLine, line_end: endLine, code_snippet: snippet },
-        verified: true,
+        source_matches: true,
+        is_template: true,
         is_expanded: false,
       }
     ];
@@ -170,12 +281,28 @@ export const ApiService = {
       });
     }
     return {
+      mark_id: `mock-mark-${Date.now()}`,
       original_category: category,
       analogy: '把它想象成水流阀门...',
       minimal_example: 'if (!ok) return;',
       prerequisite_concept: '卫语句',
       guidance: '注意检查条件',
+      is_template: true,
     };
+  },
+
+  async updateConfusionMarkExplanation(
+    id: string,
+    aiExplanation: string,
+    model: string
+  ): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke<void>('update_confusion_mark_explanation', {
+        id,
+        aiExplanation,
+        model,
+      });
+    }
   },
 
   async getConfusionMarks(filePath?: string): Promise<ConfusionMark[]> {

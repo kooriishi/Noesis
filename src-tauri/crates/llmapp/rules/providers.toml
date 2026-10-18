@@ -1,0 +1,57 @@
+# LLM Provider Signatures (Data-Driven Rules)
+
+[[providers]]
+id = "openai"
+name = "OpenAI / Compatible"
+python_imports = ["openai", "from openai import OpenAI", "from openai import AsyncOpenAI"]
+client_constructors = ["OpenAI", "AsyncOpenAI", "AzureOpenAI", "AsyncAzureOpenAI"]
+call_methods = ["chat.completions.create", "responses.create", "embeddings.create", "completions.create"]
+env_keys = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY"]
+
+[[providers]]
+id = "anthropic"
+name = "Anthropic Claude"
+python_imports = ["anthropic", "from anthropic import Anthropic", "from anthropic import AsyncAnthropic"]
+client_constructors = ["Anthropic", "AsyncAnthropic"]
+call_methods = ["messages.create", "messages.stream"]
+env_keys = ["ANTHROPIC_API_KEY"]
+
+[[providers]]
+id = "dashscope_qwen"
+name = "Alibaba DashScope / Qwen"
+python_imports = ["dashscope", "from dashscope import Generation"]
+client_constructors = ["Generation", "QwenSseLlmProvider", "DashScopeAssrProvider", "CosyVoiceTtsProvider"]
+call_methods = ["Generation.call", "CompleteStream", "SynthesizeStream"]
+env_keys = ["DASHSCOPE_API_KEY", "QWEN_API_KEY"]
+
+[[providers]]
+id = "deepseek"
+name = "DeepSeek"
+python_imports = ["openai"]
+client_constructors = ["OpenAI", "AsyncOpenAI"]
+call_methods = ["chat.completions.create"]
+env_keys = ["DEEPSEEK_API_KEY"]
+
+[[providers]]
+id = "ollama"
+name = "Ollama Local"
+python_imports = ["ollama", "from ollama import Client", "from ollama import AsyncClient"]
+client_constructors = ["Client", "AsyncClient", "ChatOllama"]
+call_methods = ["ollama.chat", "ollama.generate", "ollama.embeddings"]
+env_keys = ["OLLAMA_HOST"]
+
+[[providers]]
+id = "litellm"
+name = "LiteLLM"
+python_imports = ["litellm", "from litellm import completion", "from litellm import acompletion"]
+client_constructors = ["litellm"]
+call_methods = ["completion", "acompletion", "embedding"]
+env_keys = ["LITELLM_API_KEY"]
+
+[[providers]]
+id = "minicpm_realtime"
+name = "MiniCPM-o Realtime WebSocket"
+python_imports = ["websockets"]
+client_constructors = ["MiniCpmRealtimeNode", "WsClient", "MiniCpmSession"]
+call_methods = ["SendAudioChunk", "SendTextPrompt", "Connect"]
+env_keys = ["MINICPM_WS_URL"]

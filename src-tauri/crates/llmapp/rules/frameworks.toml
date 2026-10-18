@@ -1,0 +1,28 @@
+# LLM Application Frameworks & RAG Component Rules
+
+[[frameworks]]
+id = "langchain"
+name = "LangChain / LangGraph"
+imports = ["langchain", "langchain_core", "langchain_openai", "langchain_anthropic", "langchain_community", "langgraph"]
+client_classes = ["ChatOpenAI", "ChatAnthropic", "ChatOllama", "ChatTongyi", "ChatDeepSeek"]
+call_methods = ["invoke", "ainvoke", "stream", "astream", "batch"]
+prompt_classes = ["ChatPromptTemplate", "PromptTemplate", "SystemMessagePromptTemplate", "HumanMessagePromptTemplate"]
+workflow_classes = ["StateGraph", "MessageGraph", "AgentExecutor", "create_react_agent", "create_tool_calling_agent"]
+
+[[frameworks]]
+id = "llamaindex"
+name = "LlamaIndex"
+imports = ["llama_index"]
+client_classes = ["OpenAI", "Anthropic", "Ollama", "DashScope"]
+call_methods = ["chat", "complete", "stream_chat", "query", "aquery"]
+prompt_classes = ["PromptTemplate", "ChatPromptTemplate"]
+workflow_classes = ["Workflow", "ReActAgent", "FunctionCallingAgent"]
+
+[[frameworks]]
+id = "rag_components"
+name = "RAG Pipeline Components"
+imports = ["chromadb", "faiss", "qdrant_client", "pymilvus", "weaviate", "pinecone"]
+client_classes = ["Chroma", "FAISS", "Qdrant", "Milvus", "RecursiveCharacterTextSplitter", "OpenAIEmbeddings", "HuggingFaceEmbeddings", "DirectoryLoader", "PyPDFLoader", "TextLoader"]
+call_methods = ["from_documents", "similarity_search", "as_retriever", "split_documents", "embed_documents", "embed_query"]
+prompt_classes = []
+workflow_classes = ["RetrievalQA", "create_retrieval_chain"]
