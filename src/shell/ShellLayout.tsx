@@ -15,7 +15,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
-import { CodeEditor } from '../editor/CodeEditor';
+import { CodeEditor, evictEditorStateCache } from '../editor/CodeEditor';
 import { ProjectSidebar } from '../sidebar-project/ProjectSidebar';
 import { AiSidebar } from '../sidebar-ai/AiSidebar';
 import { ScratchRunner } from '../scratch/ScratchRunner';
@@ -120,6 +120,8 @@ export const ShellLayout: React.FC = () => {
   // Multi-Tab Files State
   const [tabs, setTabs] = useState<TabItem[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
+  const [tabBarEpoch, setTabBarEpoch] = useState<number>(0);
+  const hasInitializedRef = useRef<boolean>(false);
 
   // Project & Map State
   const [currentProject, setCurrentProject] = useState<FileNode | null>(null);
@@ -226,8 +228,11 @@ export const ShellLayout: React.FC = () => {
     localStorage.setItem('noesis_right_width', '380');
   };
 
-  // Load initial state on mount
+  // Load initial state on mount (guarded against React.StrictMode double-invocation)
   useEffect(() => {
+    if (hasInitializedRef.current) return;
+    hasInitializedRef.current = true;
+
     // Purge any legacy localStorage LLM key (A1)
     localStorage.removeItem('noesis_llm_config');
     ApiService.getLlmConfig().then(setLlmConfig).catch(console.error);
@@ -245,12 +250,18 @@ export const ShellLayout: React.FC = () => {
       const tree = await ApiService.openProject(targetPath);
       setCurrentProject(tree);
 
-      await handleTriggerIndex();
+      // When switching to a new project directory, clear stale tabs from previous workspace
+      evictEditorStateCache();
+      setTabs([]);
+      setActiveTabPath(null);
+      setTabBarEpoch((n) => n + 1);
 
       const first = findFirstFile(tree);
       if (first) {
         await handleOpenFile(first.path);
       }
+
+      await handleTriggerIndex();
     } catch (err: any) {
       console.error('Failed to open project:', err);
     }
@@ -259,6 +270,32 @@ export const ShellLayout: React.FC = () => {
   const findFirstFile = (node: FileNode): FileNode | null => {
     if (!node.is_dir) return node;
     if (node.children) {
+      // 1. Prefer README or primary entry files at current level
+      const files = node.children.filter((c) => !c.is_dir);
+      const preferredFile = files.find((f) =>
+        /^(README\.md|lib\.rs|main\.rs|main\.py|index\.tsx|index\.ts|Cargo\.toml|package\.json)$/i.test(
+          f.name
+        )
+      );
+      if (preferredFile) return preferredFile;
+
+      // 2. Prefer src/ directory over config directories like capabilities/ or .github/
+      const dirs = node.children.filter((c) => c.is_dir);
+      const srcDir = dirs.find((d) => d.name === 'src');
+      if (srcDir) {
+        const inSrc = findFirstFile(srcDir);
+        if (inSrc) return inSrc;
+      }
+
+      // 3. Any direct file before recursing into other subdirectories
+      if (files.length > 0) return files[0];
+
+      for (const d of dirs) {
+        if (d.name === 'capabilities' || d.name === 'icons') continue;
+        const found = findFirstFile(d);
+        if (found) return found;
+      }
+
       for (const c of node.children) {
         const found = findFirstFile(c);
         if (found) return found;
@@ -285,7 +322,16 @@ export const ShellLayout: React.FC = () => {
         isDirty: false,
       };
 
-      setTabs((prev) => [...prev, newTab]);
+      setTabs((prev) => {
+        // Deduplicate by path to prevent duplicate React keys under concurrent calls
+        const deduped = prev.filter(
+          (t, idx, arr) => arr.findIndex((item) => item.path === t.path) === idx
+        );
+        if (deduped.some((t) => t.path === filePath)) {
+          return deduped;
+        }
+        return [...deduped, newTab];
+      });
       setActiveTabPath(filePath);
     } catch (err: any) {
       console.error('Failed to read file:', err);
@@ -303,38 +349,53 @@ export const ShellLayout: React.FC = () => {
   };
 
   const handleCloseTab = (filePath: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
 
     const targetTab = tabs.find((t) => t.path === filePath);
-    if (!targetTab) return;
-
-    if (targetTab.isDirty) {
+    if (targetTab?.isDirty) {
       const confirmClose = window.confirm(
         `文件 "${targetTab.name}" 有未保存的修改，关闭将丢失这些修改。确定关闭吗？`
       );
       if (!confirmClose) return;
     }
 
-    const index = tabs.findIndex((t) => t.path === filePath);
-    const newTabs = tabs.filter((t) => t.path !== filePath);
-    setTabs(newTabs);
+    evictEditorStateCache(filePath);
+    // Bump tabBarEpoch to force clean reconciliation even if duplicate keys existed prior to HMR
+    setTabBarEpoch((n) => n + 1);
 
-    if (activeTabPath === filePath) {
-      if (newTabs.length > 0) {
-        const nextIndex = Math.min(index, newTabs.length - 1);
-        setActiveTabPath(newTabs[nextIndex].path);
-      } else {
-        setActiveTabPath(null);
-      }
-    }
+    setTabs((prev) => {
+      const index = prev.findIndex((t) => t.path === filePath);
+      const newTabs = prev.filter((t) => t.path !== filePath);
+
+      setActiveTabPath((currentActive) => {
+        if (currentActive === filePath) {
+          if (newTabs.length > 0) {
+            const safeIndex = index >= 0 ? Math.min(index, newTabs.length - 1) : 0;
+            return newTabs[safeIndex].path;
+          }
+          return null;
+        }
+        return currentActive;
+      });
+
+      return newTabs;
+    });
   };
 
   const handleActiveContentChange = (newContent: string) => {
     if (!activeTabPath) return;
     setTabs((prev) =>
-      prev.map((t) => (t.path === activeTabPath ? { ...t, content: newContent, isDirty: true } : t))
+      prev.map((t) =>
+        t.path === activeTabPath && t.content !== newContent
+          ? { ...t, content: newContent, isDirty: true }
+          : t
+      )
     );
   };
+
 
   const handleSaveActiveFile = async (latestContent?: string) => {
     if (!activeTab) return;
@@ -801,6 +862,7 @@ ${snippet}
         >
           {/* Multi-File Tab Bar */}
           <div
+            key={`tab-bar-${tabBarEpoch}`}
             style={{
               height: '34px',
               background: '#181825',
@@ -812,12 +874,12 @@ ${snippet}
               userSelect: 'none',
             }}
           >
-            {tabs.map((tab) => {
+            {tabs.map((tab, idx) => {
               const isActive = tab.path === activeTabPath;
               const isMarkdown = tab.language === 'markdown';
               return (
                 <div
-                  key={tab.path}
+                  key={`${tab.path}::${idx}`}
                   onClick={() => setActiveTabPath(tab.path)}
                   style={{
                     display: 'flex',

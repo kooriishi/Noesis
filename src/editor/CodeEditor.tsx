@@ -26,6 +26,14 @@ interface CachedEditorEntry {
 
 const editorStateCache = new Map<string, CachedEditorEntry>();
 
+export function evictEditorStateCache(filePath?: string) {
+  if (filePath) {
+    editorStateCache.delete(filePath);
+  } else {
+    editorStateCache.clear();
+  }
+}
+
 interface CodeEditorProps {
   filePath: string;
   initialContent: string;
