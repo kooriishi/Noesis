@@ -125,6 +125,8 @@ export const ShellLayout: React.FC = () => {
   const [currentProject, setCurrentProject] = useState<FileNode | null>(null);
   const [projectMap, setProjectMap] = useState<ProjectMap | null>(null);
   const [isIndexing, setIsIndexing] = useState<boolean>(false);
+  const [indexError, setIndexError] = useState<string | null>(null);
+  const [lastIndexedAt, setLastIndexedAt] = useState<string | null>(null);
 
   // AI & Reading State
   const [cards, setCards] = useState<ExplanationCard[]>([]);
@@ -351,14 +353,17 @@ export const ShellLayout: React.FC = () => {
 
   const handleTriggerIndex = async () => {
     setIsIndexing(true);
+    setIndexError(null);
     try {
       const map = await ApiService.indexProject();
       setProjectMap(map);
+      setLastIndexedAt(new Date().toLocaleTimeString());
       // Automatically generate deterministic fact & cloze exercises from project graph (Stage D)
       await ApiService.generateProjectExercises().catch(() => {});
       await loadDueReviews();
     } catch (err: any) {
       console.error('Index failed:', err);
+      setIndexError(err?.message || String(err));
     } finally {
       setIsIndexing(false);
     }
@@ -757,6 +762,8 @@ ${snippet}
             onOpenProject={() => handleOpenProject()}
             onTriggerIndex={handleTriggerIndex}
             isIndexing={isIndexing}
+            indexError={indexError}
+            lastIndexedAt={lastIndexedAt}
           />
         </div>
 

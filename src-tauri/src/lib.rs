@@ -187,6 +187,8 @@ fn index_project(state: State<'_, AppState>) -> Result<ProjectMap, String> {
         (pm.root_path().to_path_buf(), pm.normalized_root())
     };
 
+    let _ = state.store.ensure_schema();
+
     let ros2_adapter = Ros2Adapter::new();
     let llm_adapter = LlmAppAdapter::new();
     let adapters: [&dyn DomainAdapter; 2] = [&ros2_adapter, &llm_adapter];

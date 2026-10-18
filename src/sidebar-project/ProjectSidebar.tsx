@@ -32,6 +32,8 @@ interface ProjectSidebarProps {
   onOpenProject: () => void;
   onTriggerIndex: () => void;
   isIndexing: boolean;
+  indexError?: string | null;
+  lastIndexedAt?: string | null;
 }
 
 type MapSubView = 'modules' | 'calls' | 'ros2' | 'llm_app';
@@ -67,6 +69,8 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   onOpenProject,
   onTriggerIndex,
   isIndexing,
+  indexError,
+  lastIndexedAt,
 }) => {
   const [activeTab, setActiveTab] = useState<'files' | 'map' | 'route'>('files');
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({ '': true, src: true });
@@ -499,6 +503,37 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
               </button>
             </div>
 
+            {indexError && (
+              <div
+                style={{
+                  padding: '8px 10px',
+                  marginBottom: '10px',
+                  borderRadius: '6px',
+                  background: 'rgba(243, 139, 168, 0.14)',
+                  border: '1px solid rgba(243, 139, 168, 0.4)',
+                  color: '#f38ba8',
+                  fontSize: '11px',
+                }}
+              >
+                ⚠️ 索引错误: {indexError}
+              </div>
+            )}
+
+            {lastIndexedAt && projectMap && !indexError && (
+              <div
+                style={{
+                  padding: '4px 8px',
+                  marginBottom: '8px',
+                  borderRadius: '4px',
+                  background: 'rgba(166, 227, 161, 0.1)',
+                  color: '#a6e3a1',
+                  fontSize: '10.5px',
+                }}
+              >
+                ✓ 索引已就绪 ({lastIndexedAt}) · 共扫描 {projectMap.indexed_files_count} 个文件
+              </div>
+            )}
+
             {projectMap ? (
               <div>
                 {/* Summary KPI Cards */}
@@ -748,12 +783,18 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
 
                         <div>
                           <div style={{ fontSize: '11px', fontWeight: 600, color: '#a6e3a1', marginBottom: '5px' }}>
-                            📡 话题与服务 (Topics & Services:{' '}
-                            {ros2Entities.filter((e) => e.kind === 'ros2_topic' || e.kind === 'ros2_service').length})
+                            📡 话题、服务与参数 (Topics / Services / Params:{' '}
+                            {
+                              ros2Entities.filter((e) =>
+                                ['ros2_topic', 'ros2_service', 'ros2_action', 'ros2_param', 'ros2_timer'].includes(e.kind)
+                              ).length
+                            })
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             {ros2Entities
-                              .filter((e) => e.kind === 'ros2_topic' || e.kind === 'ros2_service')
+                              .filter((e) =>
+                                ['ros2_topic', 'ros2_service', 'ros2_action', 'ros2_param', 'ros2_timer'].includes(e.kind)
+                              )
                               .map((e) => renderEntityCard(e, '#a6e3a1'))}
                           </div>
                         </div>
@@ -761,11 +802,17 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                         <div>
                           <div style={{ fontSize: '11px', fontWeight: 600, color: '#f9e2af', marginBottom: '5px' }}>
                             🚀 Launch 启动文件与消息接口 (Launches & Interfaces:{' '}
-                            {ros2Entities.filter((e) => e.kind === 'ros2_launch' || e.kind === 'ros2_interface').length})
+                            {
+                              ros2Entities.filter(
+                                (e) => e.kind === 'ros2_launch' || e.kind.startsWith('ros2_interface') || e.kind.startsWith('urdf_')
+                              ).length
+                            })
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             {ros2Entities
-                              .filter((e) => e.kind === 'ros2_launch' || e.kind === 'ros2_interface')
+                              .filter(
+                                (e) => e.kind === 'ros2_launch' || e.kind.startsWith('ros2_interface') || e.kind.startsWith('urdf_')
+                              )
                               .map((e) => renderEntityCard(e, '#f9e2af'))}
                           </div>
                         </div>

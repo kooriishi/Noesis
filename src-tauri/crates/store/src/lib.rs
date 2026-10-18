@@ -273,8 +273,44 @@ impl DbStore {
         Arc::clone(&self.conn)
     }
 
+    pub fn ensure_schema(&self) -> std::result::Result<(), StoreError> {
+        self.init_schema()
+    }
+
     fn init_schema(&self) -> std::result::Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let _ = conn.execute_batch("PRAGMA foreign_keys = OFF;");
+
+        // Detect legacy M0-M5 index tables that had incompatible NOT NULL columns
+        // (e.g. files.content_hash, edges.source_symbol, modules.path) and rebuild them cleanly
+        let has_legacy_column = |table: &str, col: &str| -> bool {
+            let sql = format!("PRAGMA table_info({})", table);
+            if let Ok(mut stmt) = conn.prepare(&sql) {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
+                    for name in rows.flatten() {
+                        if name == col {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        if has_legacy_column("files", "content_hash")
+            || has_legacy_column("edges", "source_symbol")
+            || has_legacy_column("modules", "path")
+        {
+            let _ = conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS files;
+                DROP TABLE IF EXISTS symbols;
+                DROP TABLE IF EXISTS edges;
+                DROP TABLE IF EXISTS modules;
+                "#,
+            );
+        }
+
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = OFF;
@@ -1882,5 +1918,70 @@ mod tests {
         let prog = store.get_reading_progress("proj").unwrap();
         assert_eq!(prog.len(), 1);
         assert_eq!(prog[0].status, "done");
+    }
+
+    #[test]
+    fn test_legacy_m0_m5_schema_auto_migration() {
+        let tmp = std::env::temp_dir().join(format!(
+            "noesis_legacy_migration_{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(1)
+        ));
+        {
+            let raw = Connection::open(&tmp).unwrap();
+            raw.execute_batch(
+                r#"
+                CREATE TABLE files (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    size INTEGER NOT NULL
+                );
+                CREATE TABLE edges (
+                    id TEXT PRIMARY KEY,
+                    source_symbol TEXT NOT NULL,
+                    target_symbol TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    line INTEGER NOT NULL
+                );
+                CREATE TABLE modules (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    summary TEXT
+                );
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = DbStore::open(&tmp).expect("open and migrate legacy db");
+        let file = GraphFile {
+            id: "proj:main.py".to_string(),
+            project_id: "proj".to_string(),
+            path: "main.py".to_string(),
+            language: "python".to_string(),
+            sha256: "hash123".to_string(),
+            mtime: 1,
+            size: 42,
+            indexed_at: 2,
+        };
+        store
+            .upsert_file_graph(&file, &[], &[], &[])
+            .expect("upsert_file_graph after legacy migration");
+        let _ = std::fs::remove_file(&tmp);
+
+        // Also migrate existing local AppData db if present
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let local_db = std::path::PathBuf::from(appdata)
+                .join("com.noesis.ide")
+                .join("noesis_local.db");
+            if local_db.exists() {
+                let _ = DbStore::open(&local_db);
+            }
+        }
     }
 }
