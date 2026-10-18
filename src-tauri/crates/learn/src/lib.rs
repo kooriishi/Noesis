@@ -2,6 +2,11 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod context;
+pub mod exercises;
+pub mod knowledge;
+pub mod verifier;
+
 #[derive(Error, Debug)]
 pub enum LearnError {
     #[error("Verification error: {0}")]

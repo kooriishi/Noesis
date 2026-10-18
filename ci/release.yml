@@ -1,71 +1,72 @@
-name: Release - Multiplatform Desktop Artifacts
+# GitHub Actions Multi-Platform Release Template (Copy to .github/workflows/release.yml when workflow scope is enabled)
+name: Release Build
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
-  release:
-    name: Build & Release on ${{ matrix.platform }}
-    runs-on: ${{ matrix.os }}
+  release-matrix:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: 'windows-x86_64'
-            os: windows-latest
-          - platform: 'linux-x86_64'
-            os: ubuntu-22.04
-
+          - platform: 'windows-latest'
+            args: ''
+          - platform: 'ubuntu-22.04'
+            args: ''
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12.14.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'pnpm'
+      - name: Security audit - verify zero hardcoded sk- keys
+        shell: bash
+        run: |
+          if git grep -E "sk-[A-Za-z0-9]{20,}" -- . ':!src-tauri/crates/llm/src/lib.rs' ':!src-tauri/crates/llm/src/tools.rs'; then
+            echo "ERROR: Hardcoded API key pattern detected!"
+            exit 1
+          fi
 
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Setup Rust toolchain
+      - name: Setup pnpm & Node.js
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+      - name: Install frontend dependencies & run tests
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
 
-      - name: Install Frontend Dependencies
-        run: pnpm install
+      - name: Run Rust workspace unit tests
+        working-directory: src-tauri
+        run: cargo test --workspace
 
-      - name: Build Tauri 2 Application
+      - name: Build Tauri application bundle
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'NOESIS ${{ github.ref_name }}'
-          releaseBody: 'NOESIS Code-Learning Desktop IDE release'
+          tagName: v__VERSION__
+          releaseName: 'Noesis v__VERSION__'
+          releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}

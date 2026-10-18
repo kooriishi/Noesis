@@ -152,7 +152,70 @@ pub struct ConfusionMark {
     pub ai_explanation: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "default_mark_level")]
+    pub level: i32,
+    #[serde(default)]
+    pub resolved_at: Option<String>,
+    #[serde(default)]
+    pub resolved_level: Option<i32>,
+    #[serde(default)]
+    pub user_note: Option<String>,
     pub created_at: String,
+}
+
+fn default_mark_level() -> i32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedExplanation {
+    pub id: String,
+    pub project_id: String,
+    pub file_id: String,
+    pub range: String,
+    pub basis_hash: String,
+    pub prompt_version: String,
+    pub model: String,
+    pub request_kind: String,
+    pub json: String,
+    pub stats: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationRecord {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub summary: String,
+    pub summary_upto_message_id: Option<String>,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMessageRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: String,
+    pub content: String,
+    pub meta_json: String,
+    pub tokens: usize,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConceptProfileItem {
+    pub id: String,
+    pub name: String,
+    pub pack_ref: Option<String>,
+    pub domain: String,
+    pub confused_count: usize,
+    pub resolved_count: usize,
+    pub reviewed_correct: usize,
+    pub reviewed_wrong: usize,
+    pub last_event_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +231,18 @@ pub struct ExerciseRecord {
     pub next_review_at: String,
     pub repetition: i32,
     pub interval_days: i32,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub source_kind: String,
+    #[serde(default)]
+    pub verified_by_program: bool,
+    #[serde(default)]
+    pub ease: f64,
+    #[serde(default)]
+    pub lapses: i32,
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Clone)]
@@ -322,7 +397,62 @@ impl DbStore {
                 explanation TEXT,
                 ai_explanation TEXT,
                 model TEXT,
+                level INTEGER NOT NULL DEFAULT 1,
+                resolved_at TEXT,
+                resolved_level INTEGER,
+                user_note TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS explanations (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                range TEXT NOT NULL,
+                basis_hash TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                model TEXT NOT NULL,
+                request_kind TEXT NOT NULL,
+                json TEXT NOT NULL,
+                stats TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                summary_upto_message_id TEXT,
+                archived INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                tokens INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS concepts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                pack_ref TEXT,
+                domain TEXT NOT NULL DEFAULT 'general'
+            );
+
+            CREATE TABLE IF NOT EXISTS concept_events (
+                id TEXT PRIMARY KEY,
+                concept_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                mark_id TEXT,
+                event TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS exercises (
@@ -336,7 +466,23 @@ impl DbStore {
                 file_path TEXT NOT NULL,
                 next_review_at TEXT NOT NULL,
                 repetition INTEGER NOT NULL DEFAULT 0,
-                interval_days INTEGER NOT NULL DEFAULT 1
+                interval_days INTEGER NOT NULL DEFAULT 1,
+                project_id TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'fact',
+                verified_by_program INTEGER NOT NULL DEFAULT 1,
+                ease REAL NOT NULL DEFAULT 2.5,
+                lapses INTEGER NOT NULL DEFAULT 0,
+                stale INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS attempts (
+                id TEXT PRIMARY KEY,
+                exercise_id TEXT NOT NULL,
+                answer_json TEXT NOT NULL,
+                result TEXT NOT NULL,
+                score REAL NOT NULL,
+                time_ms INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS notes (
@@ -379,12 +525,22 @@ impl DbStore {
             "ALTER TABLE marks ADD COLUMN confusion_type TEXT;",
             "ALTER TABLE marks ADD COLUMN ai_explanation TEXT;",
             "ALTER TABLE marks ADD COLUMN model TEXT;",
+            "ALTER TABLE marks ADD COLUMN level INTEGER NOT NULL DEFAULT 1;",
+            "ALTER TABLE marks ADD COLUMN resolved_at TEXT;",
+            "ALTER TABLE marks ADD COLUMN resolved_level INTEGER;",
+            "ALTER TABLE marks ADD COLUMN user_note TEXT;",
+            "ALTER TABLE exercises ADD COLUMN project_id TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE exercises ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'fact';",
+            "ALTER TABLE exercises ADD COLUMN verified_by_program INTEGER NOT NULL DEFAULT 1;",
+            "ALTER TABLE exercises ADD COLUMN ease REAL NOT NULL DEFAULT 2.5;",
+            "ALTER TABLE exercises ADD COLUMN lapses INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE exercises ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
         }
 
-        // Create unified graph indexes (B1)
+        // Create unified graph & Stage C/D indexes
         let indexes = [
             "CREATE INDEX IF NOT EXISTS idx_files_proj_path ON files(project_id, path);",
             "CREATE INDEX IF NOT EXISTS idx_symbols_proj_file ON symbols(project_id, file_id);",
@@ -394,6 +550,9 @@ impl DbStore {
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_src ON edges(project_id, src_id);",
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_dst ON edges(project_id, dst_id);",
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_kind ON edges(project_id, kind);",
+            "CREATE INDEX IF NOT EXISTS idx_explanations_basis ON explanations(basis_hash, model, prompt_version);",
+            "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_concept_events_proj ON concept_events(project_id, concept_id);",
         ];
         for idx_sql in indexes {
             let _ = conn.execute(idx_sql, []);
@@ -1003,9 +1162,9 @@ impl DbStore {
             INSERT OR REPLACE INTO marks (
                 id, project_id, file_path, line_start, line_end,
                 code_snippet, category, confusion_type, explanation,
-                ai_explanation, model, created_at
+                ai_explanation, model, level, resolved_at, resolved_level, user_note, created_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 mark.id,
@@ -1019,6 +1178,10 @@ impl DbStore {
                 mark.explanation,
                 mark.ai_explanation,
                 mark.model,
+                mark.level.max(1),
+                mark.resolved_at,
+                mark.resolved_level,
+                mark.user_note,
                 mark.created_at
             ],
         )?;
@@ -1046,6 +1209,30 @@ impl DbStore {
         Ok(())
     }
 
+    pub fn update_mark_level_and_resolution(
+        &self,
+        id: &str,
+        level: i32,
+        resolved: bool,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let resolved_at = if resolved {
+            Some(Utc::now().to_rfc3339())
+        } else {
+            None
+        };
+        let resolved_level = if resolved { Some(level) } else { None };
+        conn.execute(
+            r#"
+            UPDATE marks
+            SET level = ?1, resolved_at = ?2, resolved_level = ?3
+            WHERE id = ?4
+            "#,
+            params![level, resolved_at, resolved_level, id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_marks(
         &self,
         file_path: Option<&str>,
@@ -1054,7 +1241,7 @@ impl DbStore {
         let conn = self.conn.lock().unwrap();
         let mut marks = Vec::new();
 
-        let select_cols = "id, project_id, file_path, line_start, line_end, code_snippet, category, confusion_type, explanation, ai_explanation, model, created_at";
+        let select_cols = "id, project_id, file_path, line_start, line_end, code_snippet, category, confusion_type, explanation, ai_explanation, model, COALESCE(level, 1), resolved_at, resolved_level, user_note, created_at";
 
         let query = match (file_path, project_id) {
             (Some(_), Some(_)) => format!(
@@ -1086,7 +1273,11 @@ impl DbStore {
                 explanation: row.get(8)?,
                 ai_explanation: row.get(9)?,
                 model: row.get(10)?,
-                created_at: row.get(11)?,
+                level: row.get(11)?,
+                resolved_at: row.get(12)?,
+                resolved_level: row.get(13)?,
+                user_note: row.get(14)?,
+                created_at: row.get(15)?,
             })
         };
 
@@ -1103,12 +1294,341 @@ impl DbStore {
         Ok(marks)
     }
 
-    pub fn insert_exercise(&self, ex: &ExerciseRecord) -> std::result::Result<(), StoreError> {
+    /// Stage C1: Lookup cached structured explanation by `(basis_hash, model, prompt_version)`
+    pub fn get_cached_explanation(
+        &self,
+        basis_hash: &str,
+        model: &str,
+        prompt_version: &str,
+    ) -> std::result::Result<Option<CachedExplanation>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn
+            .query_row(
+                r#"
+                SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at
+                FROM explanations
+                WHERE basis_hash = ?1 AND model = ?2 AND prompt_version = ?3
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+                params![basis_hash, model, prompt_version],
+                |r| {
+                    Ok(CachedExplanation {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        file_id: r.get(2)?,
+                        range: r.get(3)?,
+                        basis_hash: r.get(4)?,
+                        prompt_version: r.get(5)?,
+                        model: r.get(6)?,
+                        request_kind: r.get(7)?,
+                        json: r.get(8)?,
+                        stats: r.get(9)?,
+                        created_at: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(res)
+    }
+
+    pub fn save_explanation_cache(
+        &self,
+        entry: &CachedExplanation,
+    ) -> std::result::Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
-            INSERT OR REPLACE INTO exercises (id, unit_id, exercise_type, question, snippet, options_json, reference_answer, file_path, next_review_at, repetition, interval_days)
+            INSERT OR REPLACE INTO explanations (
+                id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at
+            )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                entry.id,
+                entry.project_id,
+                entry.file_id,
+                entry.range,
+                entry.basis_hash,
+                entry.prompt_version,
+                entry.model,
+                entry.request_kind,
+                entry.json,
+                entry.stats,
+                entry.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stage C3: Conversation & Message persistence
+    pub fn create_conversation(
+        &self,
+        id: &str,
+        project_id: &str,
+        title: &str,
+    ) -> std::result::Result<ConversationRecord, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO conversations (id, project_id, title, created_at, updated_at, summary, summary_upto_message_id, archived)
+            VALUES (?1, ?2, ?3, ?4, ?5, '', NULL, 0)
+            "#,
+            params![id, project_id, title, now, now],
+        )?;
+        Ok(ConversationRecord {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            title: title.to_string(),
+            created_at: now,
+            updated_at: now,
+            summary: String::new(),
+            summary_upto_message_id: None,
+            archived: false,
+        })
+    }
+
+    pub fn list_conversations(
+        &self,
+        project_id: Option<&str>,
+    ) -> std::result::Result<Vec<ConversationRecord>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if project_id.is_some() {
+            "SELECT id, project_id, title, created_at, updated_at, summary, summary_upto_message_id, archived FROM conversations WHERE project_id = ?1 AND archived = 0 ORDER BY updated_at DESC"
+        } else {
+            "SELECT id, project_id, title, created_at, updated_at, summary, summary_upto_message_id, archived FROM conversations WHERE archived = 0 ORDER BY updated_at DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mapper = |r: &rusqlite::Row| {
+            Ok(ConversationRecord {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                title: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                summary: r.get(5)?,
+                summary_upto_message_id: r.get(6)?,
+                archived: r.get::<_, i32>(7)? != 0,
+            })
+        };
+        let mut out = Vec::new();
+        if let Some(pid) = project_id {
+            for row in stmt.query_map(params![pid], mapper)? {
+                out.push(row?);
+            }
+        } else {
+            for row in stmt.query_map([], mapper)? {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn delete_conversation(&self, id: &str) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?1", params![id])?;
+        conn.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn update_conversation_summary(
+        &self,
+        conversation_id: &str,
+        summary: &str,
+        upto_msg_id: Option<&str>,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE conversations SET summary = ?1, summary_upto_message_id = ?2, updated_at = ?3 WHERE id = ?4",
+            params![summary, upto_msg_id, now, conversation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_message(
+        &self,
+        msg: &StoredMessageRecord,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO messages (id, conversation_id, role, content, meta_json, tokens, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                msg.id,
+                msg.conversation_id,
+                msg.role,
+                msg.content,
+                msg.meta_json,
+                msg.tokens as i64,
+                msg.created_at
+            ],
+        )?;
+        conn.execute(
+            "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+            params![msg.created_at, msg.conversation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_messages(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<StoredMessageRecord>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, conversation_id, role, content, meta_json, tokens, created_at
+            FROM messages
+            WHERE conversation_id = ?1
+            ORDER BY created_at ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |r| {
+            Ok(StoredMessageRecord {
+                id: r.get(0)?,
+                conversation_id: r.get(1)?,
+                role: r.get(2)?,
+                content: r.get(3)?,
+                meta_json: r.get(4)?,
+                tokens: r.get::<_, i64>(5)? as usize,
+                created_at: r.get(6)?,
+            })
+        })?;
+        let mut all = Vec::new();
+        for r in rows {
+            all.push(r?);
+        }
+        if all.len() > limit && limit > 0 {
+            all = all.split_off(all.len() - limit);
+        }
+        Ok(all)
+    }
+
+    /// Stage C4: Concept & Concept Event tracking
+    pub fn record_concept_event(
+        &self,
+        concept_name: &str,
+        pack_ref: Option<&str>,
+        domain: &str,
+        project_id: &str,
+        mark_id: Option<&str>,
+        event: &str,
+    ) -> std::result::Result<(), StoreError> {
+        let normalized_id = concept_name
+            .trim()
+            .to_lowercase()
+            .replace(' ', "_");
+        if normalized_id.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO concepts (id, name, pack_ref, domain)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![normalized_id, concept_name.trim(), pack_ref, domain],
+        )?;
+        let now = Utc::now().timestamp();
+        let ev_id = format!("cev-{}-{}-{}", normalized_id, event, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        conn.execute(
+            r#"
+            INSERT INTO concept_events (id, concept_id, project_id, mark_id, event, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![ev_id, normalized_id, project_id, mark_id, event, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_concept_profile(
+        &self,
+        project_id: Option<&str>,
+    ) -> std::result::Result<Vec<ConceptProfileItem>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, pack_ref, domain FROM concepts ORDER BY name ASC",
+        )?;
+        let concepts: Vec<(String, String, Option<String>, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .flatten()
+            .collect();
+
+        let mut items = Vec::new();
+        for (cid, name, pack_ref, domain) in concepts {
+            let mut ev_stmt = if project_id.is_some() {
+                conn.prepare("SELECT event, created_at FROM concept_events WHERE concept_id = ?1 AND project_id = ?2")?
+            } else {
+                conn.prepare("SELECT event, created_at FROM concept_events WHERE concept_id = ?1")?
+            };
+            let rows: Vec<(String, i64)> = if let Some(pid) = project_id {
+                ev_stmt
+                    .query_map(params![cid, pid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .flatten()
+                    .collect()
+            } else {
+                ev_stmt
+                    .query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .flatten()
+                    .collect()
+            };
+            if rows.is_empty() && project_id.is_some() {
+                continue;
+            }
+            let mut confused_count = 0;
+            let mut resolved_count = 0;
+            let mut reviewed_correct = 0;
+            let mut reviewed_wrong = 0;
+            let mut last_event_at = 0;
+            for (ev, ts) in rows {
+                if ts > last_event_at {
+                    last_event_at = ts;
+                }
+                match ev.as_str() {
+                    "confused" => confused_count += 1,
+                    "resolved" => resolved_count += 1,
+                    "reviewed_correct" => reviewed_correct += 1,
+                    "reviewed_wrong" => reviewed_wrong += 1,
+                    _ => {}
+                }
+            }
+            items.push(ConceptProfileItem {
+                id: cid,
+                name,
+                pack_ref,
+                domain,
+                confused_count,
+                resolved_count,
+                reviewed_correct,
+                reviewed_wrong,
+                last_event_at,
+            });
+        }
+        items.sort_by(|a, b| b.confused_count.cmp(&a.confused_count));
+        Ok(items)
+    }
+
+    pub fn insert_exercise(&self, ex: &ExerciseRecord) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let ease = if ex.ease <= 0.0 { 2.5 } else { ex.ease };
+        let source_kind = if ex.source_kind.is_empty() {
+            "fact"
+        } else {
+            &ex.source_kind
+        };
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO exercises (
+                id, unit_id, exercise_type, question, snippet, options_json,
+                reference_answer, file_path, next_review_at, repetition, interval_days,
+                project_id, source_kind, verified_by_program, ease, lapses, stale
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 ex.id,
@@ -1121,7 +1641,13 @@ impl DbStore {
                 ex.file_path,
                 ex.next_review_at,
                 ex.repetition,
-                ex.interval_days
+                ex.interval_days,
+                ex.project_id,
+                source_kind,
+                if ex.verified_by_program { 1 } else { 0 },
+                ease,
+                ex.lapses,
+                if ex.stale { 1 } else { 0 }
             ],
         )?;
         Ok(())
@@ -1132,9 +1658,13 @@ impl DbStore {
         let now_str = Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, unit_id, exercise_type, question, snippet, options_json, reference_answer, file_path, next_review_at, repetition, interval_days
+            SELECT id, unit_id, exercise_type, question, snippet, options_json, reference_answer,
+                   file_path, next_review_at, repetition, interval_days,
+                   COALESCE(project_id, ''), COALESCE(source_kind, 'fact'),
+                   COALESCE(verified_by_program, 1), COALESCE(ease, 2.5),
+                   COALESCE(lapses, 0), COALESCE(stale, 0)
             FROM exercises
-            WHERE next_review_at <= ?1
+            WHERE next_review_at <= ?1 AND COALESCE(stale, 0) = 0
             ORDER BY next_review_at ASC
             "#,
         )?;
@@ -1152,6 +1682,12 @@ impl DbStore {
                 next_review_at: row.get(8)?,
                 repetition: row.get(9)?,
                 interval_days: row.get(10)?,
+                project_id: row.get(11)?,
+                source_kind: row.get(12)?,
+                verified_by_program: row.get::<_, i32>(13)? != 0,
+                ease: row.get(14)?,
+                lapses: row.get(15)?,
+                stale: row.get::<_, i32>(16)? != 0,
             })
         })?;
 
@@ -1160,6 +1696,39 @@ impl DbStore {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    pub fn mark_exercise_stale(
+        &self,
+        exercise_id: &str,
+        stale: bool,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE exercises SET stale = ?1 WHERE id = ?2",
+            params![if stale { 1 } else { 0 }, exercise_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_exercise_attempt(
+        &self,
+        exercise_id: &str,
+        answer_json: &str,
+        result: &str,
+        score: f64,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
+        let id = format!("att-{}-{}", exercise_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        conn.execute(
+            r#"
+            INSERT INTO attempts (id, exercise_id, answer_json, result, score, time_ms, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+            "#,
+            params![id, exercise_id, answer_json, result, score, now],
+        )?;
+        Ok(())
     }
 }
 
@@ -1182,6 +1751,10 @@ mod tests {
             explanation: Some("analogy".to_string()),
             ai_explanation: None,
             model: None,
+            level: 1,
+            resolved_at: None,
+            resolved_level: None,
+            user_note: None,
             created_at: Utc::now().to_rfc3339(),
         };
 

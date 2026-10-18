@@ -14,12 +14,20 @@ import {
   RefreshCw,
   Trash2,
   Wifi,
+  Layers,
+  CheckCircle2,
+  BookOpen,
+  Plus,
 } from 'lucide-react';
 import {
   ExplanationCard,
   PerspectiveType,
   RewordingResult,
   ConfusionMark,
+  LearningProfileSummary,
+  ContextManifest,
+  CitationItem,
+  ConversationSessionRecord,
   LlmConfig,
   ChatMessage,
   OutboundPreview,
@@ -30,9 +38,14 @@ import { MarkdownRenderer } from '../components/MarkdownRenderer';
 
 interface AiSidebarProps {
   cards: ExplanationCard[];
+  contextManifest?: ContextManifest | null;
+  fromCache?: boolean;
   explainError?: string | null;
-  onRetryExplain?: () => void;
+  onRetryExplain?: (forceRefresh?: boolean) => void;
+  onJumpToCitation?: (filePath: string, startLine: number, endLine: number) => void;
   confusionMarks: ConfusionMark[];
+  onRefreshConfusionMarks?: () => void;
+  onEscalatedReexplain?: (mark: ConfusionMark, nextLevel: number) => void;
   activeRewording: RewordingResult | null;
   llmConfig: LlmConfig;
   isExplaining?: boolean;
@@ -46,9 +59,14 @@ interface AiSidebarProps {
 
 export const AiSidebar: React.FC<AiSidebarProps> = ({
   cards,
+  contextManifest,
+  fromCache = false,
   explainError,
   onRetryExplain,
+  onJumpToCitation,
   confusionMarks,
+  onRefreshConfusionMarks,
+  onEscalatedReexplain,
   activeRewording,
   llmConfig,
   isExplaining = false,
@@ -63,12 +81,105 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   const [pendingKeyInput, setPendingKeyInput] = useState('');
   const [connTestResult, setConnTestResult] = useState<ConnectionTestResult | null>(null);
   const [isTestingConn, setIsTestingConn] = useState(false);
+  const [showManifest, setShowManifest] = useState(false);
+  const [learningProfile, setLearningProfile] = useState<LearningProfileSummary | null>(null);
+
+  // Multi-conversation state (Stage C3)
+  const [sessions, setSessions] = useState<ConversationSessionRecord[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
 
   useEffect(() => {
     if (activeSidebarTab) {
       setActiveTab(activeSidebarTab);
     }
   }, [activeSidebarTab]);
+
+  useEffect(() => {
+    if (activeTab === 'confusion') {
+      ApiService.getLearningProfile().then(setLearningProfile).catch(() => {});
+    } else if (activeTab === 'chat') {
+      loadConversationList();
+    }
+  }, [activeTab, confusionMarks.length]);
+
+  const loadConversationList = async () => {
+    try {
+      const list = await ApiService.listConversations();
+      setSessions(list);
+      if (list.length > 0 && !activeSessionId) {
+        setActiveSessionId(list[0].id);
+        await loadSessionMessages(list[0].id);
+      }
+    } catch {
+      // ignore in mock mode
+    }
+  };
+
+  const loadSessionMessages = async (sessionId: string) => {
+    try {
+      const records = await ApiService.loadConversationMessages(sessionId);
+      if (records.length > 0) {
+        setChatMessages(
+          records.map((r) => ({
+            role: (r.role === 'user' || r.role === 'system' ? r.role : 'assistant') as
+              | 'system'
+              | 'user'
+              | 'assistant',
+            content: r.content,
+          }))
+        );
+      } else {
+        setChatMessages([
+          {
+            role: 'assistant',
+            content:
+              '👋 你好！我是 NOESIS 代码深度导读助手。在编辑器中选中任意代码片段，即可一键生成「整体、逻辑、语法、原理」四层解读，或标记看不懂换个通俗讲法！',
+          },
+        ]);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleCreateNewSession = async () => {
+    try {
+      const created = await ApiService.createConversation(`会话 ${sessions.length + 1}`);
+      setSessions((prev) => [created, ...prev]);
+      setActiveSessionId(created.id);
+      setChatMessages([
+        {
+          role: 'assistant',
+          content: '👋 已开启新对话！你可以针对当前工程代码或架构设计继续提问。',
+        },
+      ]);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDeleteCurrentSession = async () => {
+    if (!activeSessionId) return;
+    try {
+      await ApiService.deleteConversation(activeSessionId);
+      const remaining = sessions.filter((s) => s.id !== activeSessionId);
+      setSessions(remaining);
+      if (remaining.length > 0) {
+        setActiveSessionId(remaining[0].id);
+        await loadSessionMessages(remaining[0].id);
+      } else {
+        setActiveSessionId('');
+        setChatMessages([
+          {
+            role: 'assistant',
+            content: '👋 会话已清空。你可以随时开始新提问！',
+          },
+        ]);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const [activePerspective, setActivePerspective] = useState<PerspectiveType | 'all'>('all');
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
@@ -89,17 +200,39 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     setExpandedCards((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const handleResolveMark = async (id: string) => {
+    try {
+      await ApiService.resolveConfusionMark(id);
+      if (onRefreshConfusionMarks) onRefreshConfusionMarks();
+      const profile = await ApiService.getLearningProfile();
+      setLearningProfile(profile);
+    } catch (err) {
+      console.error('Resolve confusion mark failed:', err);
+    }
+  };
+
   const handleSend = async () => {
     if (!chatInput.trim() || isSending) return;
-    const newMsg: ChatMessage = { role: 'user', content: chatInput.trim() };
+    const userText = chatInput.trim();
+    const newMsg: ChatMessage = { role: 'user', content: userText };
     const updated = [...chatMessages, newMsg];
     setChatMessages(updated);
     setChatInput('');
     setIsSending(true);
 
     try {
+      let currentConvId = activeSessionId;
+      if (!currentConvId) {
+        const created = await ApiService.createConversation(userText.slice(0, 24));
+        currentConvId = created.id;
+        setActiveSessionId(created.id);
+        setSessions((prev) => [created, ...prev]);
+      }
+      await ApiService.appendConversationMessage(currentConvId, 'user', userText).catch(() => {});
+
       const resp = await onSendChat(updated);
       setChatMessages((prev) => [...prev, { role: 'assistant', content: resp }]);
+      await ApiService.appendConversationMessage(currentConvId, 'assistant', resp).catch(() => {});
     } catch (err: any) {
       setChatMessages((prev) => [
         ...prev,
@@ -146,6 +279,83 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     } finally {
       setIsTestingConn(false);
     }
+  };
+
+  const renderCitationBadge = (cit: CitationItem, idx: number) => {
+    if (cit.kind === 'knowledge') {
+      return (
+        <span
+          key={idx}
+          title={cit.note || `内置知识条目: ${cit.pack_ref}`}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '3px',
+            padding: '2px 6px',
+            borderRadius: '4px',
+            fontSize: '10px',
+            background: 'var(--noesis-status-knowledge-bg, rgba(203, 166, 247, 0.15))',
+            color: 'var(--noesis-status-knowledge-fg, #cba6f7)',
+            border: '1px solid rgba(203, 166, 247, 0.3)',
+          }}
+        >
+          <BookOpen size={10} />
+          📖 知识卡: {cit.pack_ref}
+        </span>
+      );
+    }
+
+    const startLine = cit.corrected_line_start ?? cit.line_start ?? 1;
+    const endLine = cit.corrected_line_end ?? cit.line_end ?? startLine;
+    const status = cit.verification_status;
+
+    const badgeStyle =
+      status === 'verified'
+        ? {
+            bg: 'var(--noesis-status-verified-bg, rgba(166, 227, 161, 0.14))',
+            fg: 'var(--noesis-status-verified-fg, #a6e3a1)',
+            prefix: '✓ 已核验',
+          }
+        : status === 'corrected'
+        ? {
+            bg: 'var(--noesis-status-corrected-bg, rgba(137, 180, 250, 0.14))',
+            fg: 'var(--noesis-status-corrected-fg, #89b4fa)',
+            prefix: '✓ 已修正行号',
+          }
+        : {
+            bg: 'var(--noesis-status-unverified-bg, rgba(250, 179, 135, 0.15))',
+            fg: 'var(--noesis-status-unverified-fg, #fab387)',
+            prefix: '⚠ 引用待核实',
+          };
+
+    return (
+      <button
+        key={idx}
+        onClick={() => {
+          if (cit.file && onJumpToCitation) {
+            onJumpToCitation(cit.file, startLine, endLine);
+          }
+        }}
+        title={cit.note || `${cit.file}:${startLine}-${endLine} (${cit.quote || ''})`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '4px',
+          padding: '2px 6px',
+          borderRadius: '4px',
+          fontSize: '10px',
+          background: badgeStyle.bg,
+          color: badgeStyle.fg,
+          border: '1px solid rgba(255,255,255,0.08)',
+          cursor: cit.file ? 'pointer' : 'default',
+        }}
+      >
+        <span>{badgeStyle.prefix}</span>
+        <span>
+          {cit.file ? `${cit.file.split('/').pop()}:${startLine}-${endLine}` : ''}
+        </span>
+      </button>
+    );
   };
 
   const filteredCards =
@@ -211,36 +421,137 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
         {activeTab === 'cards' && (
           <div>
-            {/* Perspective Filter Pills */}
-            <div style={{ display: 'flex', gap: '4px', marginBottom: '12px', flexWrap: 'wrap' }}>
-              {[
-                { id: 'all', label: '全部视角' },
-                { id: 'overall', label: '整体' },
-                { id: 'logic', label: '逻辑' },
-                { id: 'syntax', label: '语法' },
-                { id: 'principle', label: '原理' },
-              ].map((p) => {
-                const isSelected = activePerspective === p.id;
-                return (
+            {/* Perspective Filter Pills + Context Manifest Drawer Toggle */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '4px', marginBottom: '10px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                {[
+                  { id: 'all', label: '全部视角' },
+                  { id: 'overall', label: '整体' },
+                  { id: 'logic', label: '逻辑' },
+                  { id: 'syntax', label: '语法' },
+                  { id: 'principle', label: '原理' },
+                ].map((p) => {
+                  const isSelected = activePerspective === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setActivePerspective(p.id as any)}
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        border: '1px solid',
+                        borderColor: isSelected ? '#89b4fa' : '#313244',
+                        background: isSelected ? 'rgba(137, 180, 250, 0.15)' : '#1e1e2e',
+                        color: isSelected ? '#89b4fa' : '#a6adc8',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {contextManifest && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  {fromCache && (
+                    <span
+                      title="命中本地 basis_hash 缓存"
+                      style={{
+                        fontSize: '10px',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        background: 'rgba(166, 227, 161, 0.14)',
+                        color: '#a6e3a1',
+                      }}
+                    >
+                      ⚡ 缓存命中
+                    </span>
+                  )}
                   <button
-                    key={p.id}
-                    onClick={() => setActivePerspective(p.id as any)}
+                    onClick={() => setShowManifest((prev) => !prev)}
                     style={{
-                      padding: '3px 8px',
-                      borderRadius: '12px',
-                      fontSize: '11px',
-                      border: '1px solid',
-                      borderColor: isSelected ? '#89b4fa' : '#313244',
-                      background: isSelected ? 'rgba(137, 180, 250, 0.15)' : '#1e1e2e',
-                      color: isSelected ? '#89b4fa' : '#a6adc8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                      padding: '3px 7px',
+                      borderRadius: '4px',
+                      background: '#313244',
+                      border: 'none',
+                      color: '#89b4fa',
+                      fontSize: '10.5px',
                       cursor: 'pointer',
                     }}
                   >
-                    {p.label}
+                    <Layers size={11} />
+                    上下文清单 ({contextManifest.total_tokens} tok)
                   </button>
-                );
-              })}
+                  {onRetryExplain && (
+                    <button
+                      onClick={() => onRetryExplain(true)}
+                      title="忽略缓存强制重新生成"
+                      style={{
+                        padding: '3px 6px',
+                        borderRadius: '4px',
+                        background: '#313244',
+                        border: 'none',
+                        color: '#a6adc8',
+                        fontSize: '10.5px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <RefreshCw size={11} />
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
+
+            {/* Collapsible Context Manifest Drawer (Stage C1) */}
+            {showManifest && contextManifest && (
+              <div
+                style={{
+                  background: '#11111b',
+                  border: '1px solid #313244',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  marginBottom: '12px',
+                  fontSize: '11px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#89b4fa', fontWeight: 600, marginBottom: '6px' }}>
+                  <span>本次提供的上下文清单 (P0–P7 预算: {contextManifest.total_tokens}/{contextManifest.budget_tokens} tokens)</span>
+                  <span style={{ color: '#6c7086', fontSize: '10px' }}>hash: {contextManifest.basis_hash.slice(0, 10)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  {contextManifest.layers.map((layer) => (
+                    <div
+                      key={layer.layer}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        color: layer.included ? '#cdd6f4' : '#6c7086',
+                        fontSize: '10.5px',
+                      }}
+                    >
+                      <span>
+                        <strong>[{layer.layer}]</strong> {layer.label}: {layer.summary}
+                      </span>
+                      <span style={{ color: layer.trimmed ? '#fab387' : '#a6e3a1', whiteSpace: 'nowrap', marginLeft: '6px' }}>
+                        {layer.tokens} tok {layer.trimmed ? '(已裁剪)' : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {contextManifest.injected_knowledge_ids.length > 0 && (
+                  <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px solid #313244', color: '#cba6f7', fontSize: '10.5px' }}>
+                    📖 已注入领域知识包: {contextManifest.injected_knowledge_ids.join(', ')}
+                  </div>
+                )}
+              </div>
+            )}
 
             {isExplaining && (
               <div
@@ -258,7 +569,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 }}
               >
                 <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-                <span>正在根据选区代码与工程上下文调用大模型进行四层深度剖析...</span>
+                <span>正在组装 P0–P7 上下文并核验源码引用以生成四层深度剖析...</span>
               </div>
             )}
 
@@ -285,7 +596,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 </div>
                 {onRetryExplain && (
                   <button
-                    onClick={onRetryExplain}
+                    onClick={() => onRetryExplain(true)}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -352,7 +663,6 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         </span>
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          {/* Explicit Template Watermark (A4) */}
                           {card.is_template && (
                             <span
                               style={{
@@ -369,7 +679,6 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             </span>
                           )}
 
-                          {/* Source Reference Match Indicator (A5) */}
                           {card.source_matches ? (
                             <span
                               style={{
@@ -427,6 +736,13 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           <li key={i}>{b}</li>
                         ))}
                       </ul>
+
+                      {/* Verified Citations List (Stage C1/C5) */}
+                      {card.citations && card.citations.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginTop: '6px', marginBottom: '6px' }}>
+                          {card.citations.map((cit, idx) => renderCitationBadge(cit, idx))}
+                        </div>
+                      )}
 
                       {/* Source basis location */}
                       <div style={{ fontSize: '10.5px', color: '#6c7086', marginTop: '4px' }}>
@@ -553,6 +869,34 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
         {activeTab === 'confusion' && (
           <div>
+            {/* Learning Profile Summary Banner (Stage C4) */}
+            {learningProfile && (
+              <div
+                style={{
+                  background: '#1e1e2e',
+                  border: '1px solid #313244',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  marginBottom: '12px',
+                  fontSize: '11px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, color: '#89b4fa' }}>📊 个人学习画像摘要 (P6 自动注入)</span>
+                  <span style={{ color: '#a6e3a1' }}>
+                    已攻克 {learningProfile.resolved_marks} / 待解决 {learningProfile.open_marks}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', color: '#a6adc8', flexWrap: 'wrap' }}>
+                  {Object.entries(learningProfile.counts_by_type).map(([k, v]) => (
+                    <span key={k} style={{ background: '#313244', padding: '1px 6px', borderRadius: '4px' }}>
+                      {k}: {v}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {activeRewording && (
               <div
                 style={{
@@ -572,7 +916,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   }}
                 >
                   <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#f38ba8' }}>
-                    💡 针对「{activeRewording.original_category.toUpperCase()}」维度的换讲法
+                    💡 针对「{activeRewording.original_category.toUpperCase()}」维度的换讲法 (Level{' '}
+                    {activeRewording.reexplain_level || 1})
                   </div>
                   {activeRewording.is_template && (
                     <span
@@ -588,6 +933,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     </span>
                   )}
                 </div>
+
+                {activeRewording.similarity_warning && (
+                  <div style={{ fontSize: '10.5px', color: '#fab387', marginBottom: '6px' }}>
+                    ⚠️ {activeRewording.similarity_warning}
+                  </div>
+                )}
 
                 <div style={{ fontSize: '11px', color: '#f9e2af', fontWeight: 600 }}>生活类比：</div>
                 <div
@@ -657,12 +1008,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       parsedAi = null;
                     }
                   }
+                  const isResolved = mark.status === 'resolved';
+                  const currentLevel = mark.reexplain_level || 1;
                   return (
                     <div
                       key={mark.id}
                       style={{
                         background: '#1e1e2e',
-                        border: '1px solid #313244',
+                        border: '1px solid',
+                        borderColor: isResolved ? 'rgba(166, 227, 161, 0.35)' : '#313244',
                         borderRadius: '6px',
                         padding: '10px',
                       }}
@@ -680,12 +1034,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                               fontSize: '10px',
                               padding: '2px 5px',
                               borderRadius: '3px',
-                              background: '#f38ba8',
+                              background: isResolved ? '#a6e3a1' : '#f38ba8',
                               color: '#11111b',
                               fontWeight: 'bold',
                             }}
                           >
-                            {mark.category}
+                            {mark.category} · L{currentLevel}
                           </span>
                           {mark.model && (
                             <span style={{ fontSize: '10px', color: '#a6e3a1' }}>
@@ -693,9 +1047,46 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             </span>
                           )}
                         </div>
-                        <span style={{ fontSize: '10px', color: '#6c7086' }}>
-                          {mark.created_at.slice(0, 10)}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {!isResolved && onEscalatedReexplain && currentLevel < 3 && (
+                            <button
+                              onClick={() => onEscalatedReexplain(mark, currentLevel + 1)}
+                              style={{
+                                fontSize: '10px',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                background: '#313244',
+                                color: '#f9e2af',
+                                border: 'none',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              再换讲法 (L{currentLevel + 1})
+                            </button>
+                          )}
+                          {!isResolved ? (
+                            <button
+                              onClick={() => handleResolveMark(mark.id)}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                fontSize: '10px',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                background: 'rgba(166, 227, 161, 0.15)',
+                                color: '#a6e3a1',
+                                border: '1px solid rgba(166, 227, 161, 0.4)',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <CheckCircle2 size={10} />
+                              看懂了
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '10px', color: '#a6e3a1' }}>✓ 已解决</span>
+                          )}
+                        </div>
                       </div>
 
                       <div style={{ fontSize: '11px', color: '#89b4fa', marginTop: '4px' }}>
@@ -757,6 +1148,69 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
         {activeTab === 'chat' && (
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+            {/* Multi-Session Selector Bar (Stage C3) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+              <select
+                value={activeSessionId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setActiveSessionId(id);
+                  if (id) loadSessionMessages(id);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '4px 8px',
+                  background: '#1e1e2e',
+                  border: '1px solid #313244',
+                  borderRadius: '4px',
+                  color: '#cdd6f4',
+                  fontSize: '11px',
+                }}
+              >
+                {sessions.length === 0 && <option value="">当前临时会话</option>}
+                {sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title} ({s.updated_at.slice(5, 16)})
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleCreateNewSession}
+                title="新建独立会话"
+                style={{
+                  padding: '4px 8px',
+                  background: '#313244',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#89b4fa',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '3px',
+                }}
+              >
+                <Plus size={12} />
+                新会话
+              </button>
+              {activeSessionId && (
+                <button
+                  onClick={handleDeleteCurrentSession}
+                  title="删除当前会话"
+                  style={{
+                    padding: '4px 6px',
+                    background: 'transparent',
+                    border: '1px solid rgba(243, 139, 168, 0.3)',
+                    borderRadius: '4px',
+                    color: '#f38ba8',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
+
             <div
               style={{
                 flex: 1,

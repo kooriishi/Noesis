@@ -25,6 +25,7 @@ import {
   FileNode,
   ProjectMap,
   ExplanationCard,
+  ContextManifest,
   RewordingResult,
   ConfusionMark,
   LlmConfig,
@@ -127,6 +128,14 @@ export const ShellLayout: React.FC = () => {
 
   // AI & Reading State
   const [cards, setCards] = useState<ExplanationCard[]>([]);
+  const [contextManifest, setContextManifest] = useState<ContextManifest | null>(null);
+  const [fromCache, setFromCache] = useState<boolean>(false);
+  const [jumpToRange, setJumpToRange] = useState<{
+    filePath: string;
+    startLine: number;
+    endLine: number;
+    nonce: number;
+  } | null>(null);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [lastExplainSelection, setLastExplainSelection] = useState<{
     snippet: string;
@@ -281,6 +290,16 @@ export const ShellLayout: React.FC = () => {
     }
   };
 
+  const handleJumpToCitation = async (filePath: string, startLine: number, endLine: number) => {
+    await handleOpenFile(filePath);
+    setJumpToRange({
+      filePath,
+      startLine,
+      endLine,
+      nonce: Date.now(),
+    });
+  };
+
   const handleCloseTab = (filePath: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
 
@@ -335,6 +354,9 @@ export const ShellLayout: React.FC = () => {
     try {
       const map = await ApiService.indexProject();
       setProjectMap(map);
+      // Automatically generate deterministic fact & cloze exercises from project graph (Stage D)
+      await ApiService.generateProjectExercises().catch(() => {});
+      await loadDueReviews();
     } catch (err: any) {
       console.error('Index failed:', err);
     } finally {
@@ -342,7 +364,12 @@ export const ShellLayout: React.FC = () => {
     }
   };
 
-  const handleExplainSelection = async (snippet: string, startLine: number, endLine: number) => {
+  const handleExplainSelection = async (
+    snippet: string,
+    startLine: number,
+    endLine: number,
+    forceRefresh: boolean = false
+  ) => {
     if (!activeTab) return;
     setRightCollapsed(false);
     setActiveSidebarTab('cards');
@@ -351,128 +378,48 @@ export const ShellLayout: React.FC = () => {
     setLastExplainSelection({ snippet, startLine, endLine });
 
     try {
-      // 1. Generate local 4-perspective template cards with source_matches check from Rust
-      const generatedCards = await ApiService.explainCode(
+      // Stage C1/C5 structured pipeline (P0-P7 ContextAssembler + CitationVerifier + SQLite basis_hash cache)
+      const structured = await ApiService.explainSelectionStructured(
+        llmConfig,
         activeTab.path,
         snippet,
         startLine,
-        endLine
+        endLine,
+        forceRefresh
       );
 
-      const hasKey = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama');
-
-      // 2. If API key is configured, perform deep contextual multi-perspective analysis
-      if (hasKey && !llmConfig.offline_mode) {
-        let systemPrompt = await ApiService.getExpertSystemPrompt();
-        if (!systemPrompt || systemPrompt.trim().length === 0) {
-          systemPrompt =
-            '你是一位精通底层原理与工程架构的 NOESIS 代码深度导读专家。请严格按照【整体】、【逻辑】、【语法】、【原理】四层正交视角给出详尽透视。';
-        }
-
-        const userPrompt = `请针对以下代码选区进行深度导读：
-
-【文件路径】: ${activeTab.path} (行 ${startLine} - ${endLine})
-【编程语言】: ${activeTab.language}
-【代码选区】:
-\`\`\`${activeTab.language}
-${snippet}
-\`\`\`
-
-【输出格式要求】：
-请以纯 JSON 格式输出，不要包含任何额外的问候或反引号围栏。JSON 格式如下：
-{
-  "overall": {
-    "title": "整体架构与数据流",
-    "one_sentence": "1句话核心结论（直击要害，概括本段代码在系统全局拓扑中的角色）",
-    "bullets": ["职责边界要点", "依赖上下游关系", "数据流向契约"],
-    "detail": "整体视角深度解析与数据流向推演（支持 Markdown 格式）"
-  },
-  "logic": {
-    "title": "控制流程与边界条件",
-    "one_sentence": "1句话核心结论（概括控制流、卫语句与关键边界）",
-    "bullets": ["分支控制要点", "状态跃迁原子性", "极端边界与回滚"],
-    "detail": "控制流分发、状态机跃迁与极端情况处理深度详述"
-  },
-  "syntax": {
-    "title": "语言特性与惯用写法",
-    "one_sentence": "1句话核心结论（概括所用语言特性的惯用写法）",
-    "bullets": ["语言特有零成本抽象", "所有权/作用域/生命周期", "错误处理契约"],
-    "detail": "语言特性惯用法剖析，对比朴素写法的优势"
-  },
-  "principle": {
-    "title": "底层原理与算法设计",
-    "one_sentence": "1句话核心结论（直击底层物理代价与算法设计动机）",
-    "bullets": ["核心算法时空局部性", "系统调用/事件循环机制", "设计者规避的物理代价"],
-    "detail": "系统底层机制（内存局部性、调度、I/O 等）与作者规避的代价详述"
-  }
-}`;
-
-        try {
-          const aiResponse = await ApiService.sendLlmChat(llmConfig, [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ]);
-
-          // Extract JSON via code fence or balanced braces (A4 - never greedy regex)
-          const extracted = extractJsonObject<Record<string, any>>(aiResponse);
-          if (extracted.ok) {
-            const parsed = extracted.data;
-            const perspectives: Array<'overall' | 'logic' | 'syntax' | 'principle'> = [
-              'overall',
-              'logic',
-              'syntax',
-              'principle',
-            ];
-
-            let anyUpdated = false;
-            for (const p of perspectives) {
-              if (parsed[p]) {
-                const targetCard = generatedCards.find((c) => c.perspective === p);
-                if (targetCard) {
-                  if (parsed[p].title) targetCard.title = parsed[p].title;
-                  if (parsed[p].one_sentence) targetCard.one_sentence = parsed[p].one_sentence;
-                  if (Array.isArray(parsed[p].bullets) && parsed[p].bullets.length > 0) {
-                    targetCard.key_bullets = parsed[p].bullets;
-                  }
-                  if (parsed[p].detail) targetCard.detailed_body = parsed[p].detail;
-                  targetCard.is_template = false;
-                  anyUpdated = true;
-                }
-              }
-            }
-
-            if (!anyUpdated) {
-              setExplainError('AI 返回的 JSON 不包含标准四层视角字段，当前仅显示本地模板占位卡。');
-            }
-          } else {
-            setExplainError(`AI 输出结构解析失败 (${extracted.error})，当前回退显示本地模板占位卡。`);
-          }
-        } catch (chatErr: any) {
-          // Explicit error banner instead of silent console.warn (A4)
-          setExplainError(`AI 解读请求失败：${chatErr?.message || String(chatErr)}`);
-        }
-      } else {
-        setExplainError(
-          llmConfig.offline_mode
-            ? '当前处于完全离线模式，展示本地模板占位卡片。'
-            : '当前未配置模型 API Key，展示本地模板占位卡片。请在「设置」中配置密钥后重试。'
-        );
+      setCards(structured.cards);
+      setContextManifest(structured.manifest);
+      setFromCache(structured.from_cache);
+      if (structured.warning) {
+        setExplainError(structured.warning);
       }
-
-      setCards(generatedCards);
     } catch (err: any) {
+      // Fallback to local template cards if structured command throws
+      try {
+        const fallbackCards = await ApiService.explainCode(
+          activeTab.path,
+          snippet,
+          startLine,
+          endLine
+        );
+        setCards(fallbackCards);
+      } catch {
+        // ignore
+      }
       setExplainError(`解读生成遇到异常: ${err?.message || String(err)}`);
     } finally {
       setIsExplaining(false);
     }
   };
 
-  const handleRetryExplain = () => {
+  const handleRetryExplain = (forceRefresh: boolean = true) => {
     if (lastExplainSelection) {
       handleExplainSelection(
         lastExplainSelection.snippet,
         lastExplainSelection.startLine,
-        lastExplainSelection.endLine
+        lastExplainSelection.endLine,
+        forceRefresh
       );
     }
   };
@@ -481,7 +428,8 @@ ${snippet}
     snippet: string,
     startLine: number,
     endLine: number,
-    category: string
+    category: string,
+    reexplainLevel: number = 1
   ) => {
     if (!activeTab) return;
     setRightCollapsed(false);
@@ -493,18 +441,21 @@ ${snippet}
         startLine,
         endLine,
         snippet,
-        category
+        category,
+        reexplainLevel
       );
 
-      const hasKey = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama');
+      const hasKey = Boolean(
+        llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama'
+      );
 
       if (hasKey && !llmConfig.offline_mode) {
-        const prompt = `用户在阅读文件 "${activeTab.path}" 第 ${startLine}-${endLine} 行代码时，针对【${category}】视角标记了「看不懂」：
+        const prompt = `用户在阅读文件 "${activeTab.path}" 第 ${startLine}-${endLine} 行代码时，针对【${category}】视角标记了「看不懂」（重讲等级 Level ${reexplainLevel}）：
 \`\`\`${activeTab.language}
 ${snippet}
 \`\`\`
 
-请根据《NOESIS 代码深度导读专家》准则的分类降维策略为该代码片段进行针对性重讲：
+请根据《NOESIS 代码深度导读专家》准则的分类降维策略为该代码片段进行针对性重讲（必须采用不同于原解释的全新类比和切入点）：
 - overall（整体）：引入生活/工程实体系统类比（如物流分拣机、机场安检流）。
 - logic（逻辑）：剥离多余代码，提供 3 行以内的最简最小可运行示例。
 - syntax（语法）：用最原始的 if-else 或基础语句等价重写该语法糖。
@@ -529,6 +480,7 @@ ${snippet}
             rewording = {
               mark_id: rewording.mark_id,
               original_category: category,
+              reexplain_level: reexplainLevel,
               analogy: parsed.analogy || rewording.analogy,
               minimal_example: parsed.minimal_example || rewording.minimal_example,
               prerequisite_concept: parsed.prerequisite_concept || rewording.prerequisite_concept,
@@ -555,6 +507,17 @@ ${snippet}
     } catch (err: any) {
       alert(`标记卡点失败: ${err}`);
     }
+  };
+
+  const handleEscalatedReexplain = async (mark: ConfusionMark, nextLevel: number) => {
+    await handleOpenFile(mark.file_path);
+    await handleMarkConfusion(
+      mark.code_snippet,
+      mark.line_start,
+      mark.line_end,
+      mark.category,
+      nextLevel
+    );
   };
 
   const loadConfusionMarks = async () => {
@@ -925,13 +888,13 @@ ${snippet}
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
             {activeTab ? (
               <CodeEditor
-                key={activeTab.path}
                 filePath={activeTab.path}
                 initialContent={activeTab.content}
                 language={activeTab.language}
                 fontSize={settings.editorFontSize}
                 fontFamily={settings.fontFamily}
                 wordWrap={settings.wordWrap}
+                jumpToRange={jumpToRange}
                 onContentChange={handleActiveContentChange}
                 onSave={handleSaveActiveFile}
                 onExplainSelection={handleExplainSelection}
@@ -1004,9 +967,14 @@ ${snippet}
         >
           <AiSidebar
             cards={cards}
+            contextManifest={contextManifest}
+            fromCache={fromCache}
             explainError={explainError}
             onRetryExplain={handleRetryExplain}
+            onJumpToCitation={handleJumpToCitation}
             confusionMarks={confusionMarks}
+            onRefreshConfusionMarks={loadConfusionMarks}
+            onEscalatedReexplain={handleEscalatedReexplain}
             activeRewording={activeRewording}
             llmConfig={llmConfig}
             isExplaining={isExplaining}

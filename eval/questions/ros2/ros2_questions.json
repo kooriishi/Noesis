@@ -1,0 +1,343 @@
+[
+  {
+    "id": "ros2_overall_01",
+    "project_kind": "ros2",
+    "perspective": "overall",
+    "question": "请从整体架构视角说明语音识别发布节点在工作空间中的职责、发布与订阅的话题及上下游协作节点。",
+    "target": {
+      "file": "src/voice_recognition/src/iat_publish.cpp",
+      "line_start": 1,
+      "line_end": 60
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "指出该节点负责采集或接收唤醒信号并向语音识别结果话题发布文本消息",
+        "weight": 2.0,
+        "evidence": { "file": "src/voice_recognition/src/iat_publish.cpp", "line": 25 }
+      },
+      {
+        "id": "rp2",
+        "text": "列出同一话题上的下游订阅节点（如语音控制或大模型对话节点）及对应源文件位置",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "声称该节点使用 ROS1 的 ros::NodeHandle",
+      "编造不存在的 Action Server 接口"
+    ],
+    "status": "draft",
+    "notes": "待用户对照 RobotVoiceWS-main 审定参考要点与行号后改为 approved"
+  },
+  {
+    "id": "ros2_overall_02",
+    "project_kind": "ros2",
+    "perspective": "overall",
+    "question": "请说明语音合成订阅节点在整个语音交互闭环中的角色以及它与上游节点的通信接口。",
+    "target": {
+      "file": "src/voice_tts/src/tts_subscribe.cpp",
+      "line_start": 1,
+      "line_end": 55
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明该节点订阅待播报文本话题并调用语音合成输出音频",
+        "weight": 2.0,
+        "evidence": { "file": "src/voice_tts/src/tts_subscribe.cpp", "line": 20 }
+      },
+      {
+        "id": "rp2",
+        "text": "准确指出向该话题发布消息的上游节点",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "将该订阅节点误认为发布底盘速度指令 /cmd_vel 的节点"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_overall_03",
+    "project_kind": "ros2",
+    "perspective": "overall",
+    "question": "该 launch 启动文件拉起了哪些节点？各节点之间通过哪些参数配置或话题映射协同工作？",
+    "target": {
+      "file": "src/voice_bringup/launch/voice_assistant.launch.py",
+      "line_start": 1,
+      "line_end": 80
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "完整列出 launch_ros.actions.Node 启动的各个包名、可执行文件与节点名",
+        "weight": 2.0,
+        "evidence": { "file": "src/voice_bringup/launch/voice_assistant.launch.py", "line": 15 }
+      },
+      {
+        "id": "rp2",
+        "text": "指出传入的 YAML 参数文件或 parameters 字典覆盖关系",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "遗漏 launch 文件中显式声明的节点"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_logic_01",
+    "project_kind": "ros2",
+    "perspective": "logic",
+    "question": "请追踪话题订阅回调函数收到一条消息后的控制流分支与状态更新步骤。",
+    "target": {
+      "file": "src/voice_control/src/voice_control_node.cpp",
+      "line_start": 20,
+      "line_end": 75
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明回调触发时机（由 Executor 从订阅队列取出消息时调用）",
+        "weight": 1.5
+      },
+      {
+        "id": "rp2",
+        "text": "按顺序列出空消息/无效指令判断分支及对应发布的控制指令",
+        "weight": 2.0,
+        "evidence": { "file": "src/voice_control/src/voice_control_node.cpp", "line": 35 }
+      }
+    ],
+    "must_not": [
+      "声称回调在 create_subscription 注册瞬间同步执行完整业务逻辑"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_logic_02",
+    "project_kind": "ros2",
+    "perspective": "logic",
+    "question": "请分析定时器回调与音频流读取循环之间的标志位同步与异常退出逻辑。",
+    "target": {
+      "file": "src/voice_recognition/src/iat_publish.cpp",
+      "line_start": 60,
+      "line_end": 120
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "指出唤醒标志位何时置位、何时复位",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明 SDK 返回错误码时的资源释放与早退路径",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "忽略错误分支直接假设每次识别都成功发布"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_logic_03",
+    "project_kind": "ros2",
+    "perspective": "logic",
+    "question": "节点初始化阶段如何依次读取 ROS2 参数并初始化第三方语音 SDK？若参数缺失会怎样？",
+    "target": {
+      "file": "src/voice_tts/src/tts_subscribe.cpp",
+      "line_start": 15,
+      "line_end": 65
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明 declare_parameter 与 get_parameter 的默认值与覆盖顺序",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出登录或初始化失败时的日志报错与状态处理",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称未声明的参数可以直接通过 get_parameter 获取而不报错或返回空"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_syntax_01",
+    "project_kind": "ros2",
+    "perspective": "syntax",
+    "question": "请解释 create_subscription 调用中模板参数、std::bind 与占位符 std::placeholders::_1 的 C++ 语法作用。",
+    "target": {
+      "file": "src/voice_tts/src/tts_subscribe.cpp",
+      "line_start": 20,
+      "line_end": 40
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "解释模板参数指定 ROS2 消息类型以及 SharedPtr 回调签名的匹配关系",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "给出与 std::bind(&Class::cb, this, _1) 等价的 C++ Lambda 写法对照",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "将 std::placeholders::_1 解释为队列深度或 QoS 参数"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_syntax_02",
+    "project_kind": "ros2",
+    "perspective": "syntax",
+    "question": "请解析类继承 public rclcpp::Node 的构造函数初始化列表与 SharedPtr 智能指针管理语法。",
+    "target": {
+      "file": "src/voice_control/src/voice_control_node.cpp",
+      "line_start": 10,
+      "line_end": 35
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明基类构造函数 rclcpp::Node(\"node_name\") 的调用方式",
+        "weight": 1.5
+      },
+      {
+        "id": "rp2",
+        "text": "解释 std::make_shared 在 rclcpp::spin(node) 中的所有权与引用计数语义",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "建议对 std::make_shared 创建的节点手动调用 delete"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_syntax_03",
+    "project_kind": "ros2",
+    "perspective": "syntax",
+    "question": "请解释自定义 .msg/.srv 接口文件在编译后会生成怎样的 C++ 命名空间与头文件包含路径。",
+    "target": {
+      "file": "src/voice_interfaces/msg/VoiceCmd.msg",
+      "line_start": 1,
+      "line_end": 20
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明 rosidl 将 CamelCase 文件名转为 snake_case 头文件路径（如 package/msg/voice_cmd.hpp）的规则",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出 C++ 类型名为 package::msg::VoiceCmd",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 C++ 直接 #include \".msg\" 原始文件"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_principle_01",
+    "project_kind": "ros2",
+    "perspective": "principle",
+    "question": "为什么这里的发布者与订阅者需要配置匹配的 QoS 策略？如果一端使用 SensorDataQoS（Best Effort）而另一端使用默认 Reliable 会发生什么？",
+    "target": {
+      "file": "src/voice_recognition/src/iat_publish.cpp",
+      "line_start": 20,
+      "line_end": 45
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 ros2.qos.compatibility 说明 Best Effort 发布者与 Reliable 订阅者不兼容会导致收不到消息",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明可使用 ros2 topic info -v 检查端点 QoS 配置",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 Best Effort 发布者可以与 Reliable 订阅者正常建立 DDS 匹配"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_principle_02",
+    "project_kind": "ros2",
+    "perspective": "principle",
+    "question": "rclcpp::spin 默认使用什么执行器？如果在订阅回调里同步阻塞等待另一个服务响应或耗时语音合成，会带来什么并发问题？",
+    "target": {
+      "file": "src/voice_tts/src/tts_subscribe.cpp",
+      "line_start": 40,
+      "line_end": 75
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 ros2.executor_callback_groups 说明默认 SingleThreadedExecutor 与 MutuallyExclusive 回调组的行为",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出回调内同步等待同一执行器处理的响应会导致死锁或阻塞后续消息处理，以及 MultiThreadedExecutor + CallbackGroup 的解法",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "声称 rclcpp::spin 默认会为每次回调自动开启新操作系统线程并行执行"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "ros2_principle_03",
+    "project_kind": "ros2",
+    "perspective": "principle",
+    "question": "为什么该需求选用 ROS2 Topic（话题）而不是 Service（服务）或 Action（动作）来传递语音识别文本流？",
+    "target": {
+      "file": "src/voice_recognition/src/iat_publish.cpp",
+      "line_start": 15,
+      "line_end": 40
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 ros2.topic_service_action 对比话题（单向发布订阅解耦、支持一对多监听）与服务/动作的适用场景",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "结合项目结构说明多个下游模块可以无侵入地同时订阅语音结果",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 ROS2 Topic 原生提供请求确认与进度反馈通道"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  }
+]

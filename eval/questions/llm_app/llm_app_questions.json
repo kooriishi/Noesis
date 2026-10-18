@@ -1,0 +1,339 @@
+[
+  {
+    "id": "llm_overall_01",
+    "project_kind": "llm_app",
+    "perspective": "overall",
+    "question": "请从整体视角梳理用户请求从 Web 路由入口进入后，依次经过检索器、提示词组装与大模型调用的完整数据流路径。",
+    "target": {
+      "file": "app/main.py",
+      "line_start": 1,
+      "line_end": 55
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "指出入口路由函数及其调用的检索、提示词模板和模型调用点位置",
+        "weight": 2.0,
+        "evidence": { "file": "app/main.py", "line": 20 }
+      },
+      {
+        "id": "rp2",
+        "text": "明确标注调用链中哪些环节是静态确定边（exact），哪些是动态配置或未解析（unresolved）",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "编造代码中未出现的外部数据库或中间件"
+    ],
+    "status": "draft",
+    "notes": "待用户对照验证项目审定参考要点后改为 approved"
+  },
+  {
+    "id": "llm_overall_02",
+    "project_kind": "llm_app",
+    "perspective": "overall",
+    "question": "该智能体图（StateGraph）包含哪些节点、普通边与条件边？整体编排职责是什么？",
+    "target": {
+      "file": "app/agent_graph.py",
+      "line_start": 1,
+      "line_end": 70
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "列出 add_node 注册的所有节点名称及对应处理函数",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明 add_conditional_edges 的路由判断函数与各分支目标节点",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "将条件边画成无条件固定顺序执行"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_overall_03",
+    "project_kind": "llm_app",
+    "perspective": "overall",
+    "question": "请说明知识库离线构建（分块与向量入库）与在线查询检索两个模块之间的衔接关系与共享配置。",
+    "target": {
+      "file": "app/rag_pipeline.py",
+      "line_start": 1,
+      "line_end": 65
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "指出文档切分器（chunk_size / chunk_overlap）与向量集合名称",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "强调写入路径与查询路径使用了同一个 Embedding 模型实例或配置",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称查询时不需要经过 Embedding 直接用原始文本比对向量索引"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_logic_01",
+    "project_kind": "llm_app",
+    "perspective": "logic",
+    "question": "请逐步追踪工具调用循环（Tool Calling Loop）在收到模型返回的 tool_calls 后如何执行工具、回填消息并决定何时终止。",
+    "target": {
+      "file": "app/tool_runner.py",
+      "line_start": 15,
+      "line_end": 80
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明当 finish_reason 或 tool_calls 非空时进入工具执行分支，并以 role='tool' 追加消息",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出最大步数限制（max_steps）及工具参数解析异常时的容错分支",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "遗漏将 assistant 的 tool_calls 消息先放入历史就直接发送 role='tool' 消息"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_logic_02",
+    "project_kind": "llm_app",
+    "perspective": "logic",
+    "question": "请追踪结构化输出解析与校验失败时的自动重试逻辑。",
+    "target": {
+      "file": "app/structured_client.py",
+      "line_start": 10,
+      "line_end": 65
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "按顺序列出 JSON 解析或 Pydantic 校验、捕获 ValidationError 并构造修正提示重试的流程",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明超过最大重试次数后的错误返回或降级行为",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称校验失败时会静默忽略错误并返回空字典冒充成功"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_logic_03",
+    "project_kind": "llm_app",
+    "perspective": "logic",
+    "question": "请分析流式 SSE 响应生成器的执行过程，包括首包发送、增量拼接与客户端断开时的清理逻辑。",
+    "target": {
+      "file": "app/streaming_route.py",
+      "line_start": 10,
+      "line_end": 60
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明 async for 遍历模型流式 chunk 并 yield data: 帧的控制流",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出异常或取消时的 finally 资源释放逻辑",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 StreamingResponse 会等所有 token 生成完毕后才一次性发给客户端"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_syntax_01",
+    "project_kind": "llm_app",
+    "perspective": "syntax",
+    "question": "请解释 FastAPI 路由上的装饰器、Depends 依赖注入以及 async def 异步生成器的 Python 语法特性。",
+    "target": {
+      "file": "app/main.py",
+      "line_start": 10,
+      "line_end": 45
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "解释 @app.post 装饰器如何把函数注册为路由处理器以及 Pydantic 请求体自动反序列化语法",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明 async/await 与 yield 异步生成器的语法语义及简单等价写法",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "混淆普通同步函数与异步协程对象的调用方式"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_syntax_02",
+    "project_kind": "llm_app",
+    "perspective": "syntax",
+    "question": "请解释 LangGraph 状态定义中 TypedDict 与 Annotated[list, operator.add] 的类型注解语法及其在状态合并时的作用。",
+    "target": {
+      "file": "app/agent_graph.py",
+      "line_start": 5,
+      "line_end": 30
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明 TypedDict 定义图状态字典键类型，Annotated 携带元数据 reducer 函数",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "解释为什么用 operator.add 时节点返回的新消息会追加到列表而非覆盖原列表",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "声称 Annotated 会在普通 Python 字典赋值时自动触发 operator.add"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_syntax_03",
+    "project_kind": "llm_app",
+    "perspective": "syntax",
+    "question": "请解释 @tool 装饰器与函数 docstring、类型注解是如何被提取为 OpenAI 工具 JSON Schema 的。",
+    "target": {
+      "file": "app/tools.py",
+      "line_start": 1,
+      "line_end": 40
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "说明函数签名中的参数类型注解对应 JSON Schema 的 properties 与 required",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出 docstring 会作为工具的 description 提供给模型决定何时调用",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称函数的 docstring 只是给程序员看的注释，对模型调用工具没有任何影响"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_principle_01",
+    "project_kind": "llm_app",
+    "perspective": "principle",
+    "question": "为什么这里将 temperature 设为较低值并开启 response_format？采样参数与结构化输出约束在底层是如何配合的？",
+    "target": {
+      "file": "app/structured_client.py",
+      "line_start": 15,
+      "line_end": 40
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 llm.sampling_params 与 llm.structured_output 解释低温采样提高确定性、JSON Schema 约束解码减少语法格式错误",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出即使开启结构化输出仍需考虑 max_tokens 截断导致 JSON 不完整的边界情况",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 temperature=0 在所有分布式 GPU 推理后端上都绝对 100% 比特级一致且永不截断"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_principle_02",
+    "project_kind": "llm_app",
+    "perspective": "principle",
+    "question": "为什么文档切分器设置了 chunk_size 与 chunk_overlap？分块过大或过小分别会对 RAG 检索与回答质量造成什么影响？",
+    "target": {
+      "file": "app/rag_pipeline.py",
+      "line_start": 10,
+      "line_end": 35
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 llm.rag_chunking 解释分块过小丢失跨句指代上下文、分块过大稀释向量语义并浪费上下文预算",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "说明 chunk_overlap 防止关键信息恰好在切分边界被切断",
+        "weight": 1.5
+      }
+    ],
+    "must_not": [
+      "声称 chunk_size 越大检索精度一定越高"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  },
+  {
+    "id": "llm_principle_03",
+    "project_kind": "llm_app",
+    "perspective": "principle",
+    "question": "为什么在组装多轮对话与系统提示词时，要把稳定的系统规则和知识包放在消息最前面，而把动态变化的选区和问题放在后面？",
+    "target": {
+      "file": "app/prompt_builder.py",
+      "line_start": 1,
+      "line_end": 45
+    },
+    "reference_points": [
+      {
+        "id": "rp1",
+        "text": "引用 llm.prompt_caching 说明前缀 KV 缓存（Prefix Caching）依赖请求开头的字节完全一致",
+        "weight": 2.0
+      },
+      {
+        "id": "rp2",
+        "text": "指出把时间戳或动态变量塞进系统提示词开头会导致前缀缓存整体失效",
+        "weight": 2.0
+      }
+    ],
+    "must_not": [
+      "声称前缀缓存与消息顺序无关，放在末尾也能命中前缀缓存"
+    ],
+    "status": "draft",
+    "notes": "待用户审定参考要点"
+  }
+]

@@ -1,0 +1,21 @@
+[package]
+name = "noesis-eval"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "noesis-eval"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+walkdir = "2"
+noesis-learn = { path = "../learn" }
+noesis-store = { path = "../store" }
+noesis-llm = { path = "../llm" }
+
+[dev-dependencies]
+tempfile = "3"

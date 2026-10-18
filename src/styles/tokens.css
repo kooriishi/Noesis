@@ -1,0 +1,66 @@
+:root {
+  /* Color Palette - Catppuccin Mocha / Dark Learning Theme */
+  --noesis-bg-crust: #11111b;
+  --noesis-bg-mantle: #181825;
+  --noesis-bg-base: #1e1e2e;
+  --noesis-bg-surface0: #313244;
+  --noesis-bg-surface1: #45475a;
+  --noesis-bg-surface2: #585b70;
+
+  /* Text Hierarchy */
+  --noesis-text-primary: #cdd6f4;
+  --noesis-text-secondary: #bac2de;
+  --noesis-text-muted: #a6adc8;
+  --noesis-text-subtle: #6c7086;
+
+  /* Semantic Accents */
+  --noesis-accent-blue: #89b4fa;
+  --noesis-accent-lavender: #b4befe;
+  --noesis-accent-mauve: #cba6f7;
+  --noesis-accent-green: #a6e3a1;
+  --noesis-accent-yellow: #f9e2af;
+  --noesis-accent-peach: #fab387;
+  --noesis-accent-red: #f38ba8;
+  --noesis-accent-teal: #94e2d5;
+
+  /* Domain & Verification Status Colors */
+  --noesis-status-verified-bg: rgba(166, 227, 161, 0.14);
+  --noesis-status-verified-fg: #a6e3a1;
+  --noesis-status-corrected-bg: rgba(137, 180, 250, 0.14);
+  --noesis-status-corrected-fg: #89b4fa;
+  --noesis-status-unverified-bg: rgba(250, 179, 135, 0.15);
+  --noesis-status-unverified-fg: #fab387;
+  --noesis-status-knowledge-bg: rgba(203, 166, 247, 0.15);
+  --noesis-status-knowledge-fg: #cba6f7;
+
+  /* Typography */
+  --noesis-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  --noesis-font-mono: "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace;
+  --noesis-font-size-xs: 10.5px;
+  --noesis-font-size-sm: 11.5px;
+  --noesis-font-size-md: 12.5px;
+  --noesis-font-size-lg: 14px;
+  --noesis-font-size-xl: 16px;
+
+  /* Spacing Scale (4 / 8 / 12 / 16 / 24) */
+  --noesis-space-1: 4px;
+  --noesis-space-2: 8px;
+  --noesis-space-3: 12px;
+  --noesis-space-4: 16px;
+  --noesis-space-6: 24px;
+
+  /* Border & Radius */
+  --noesis-border-subtle: 1px solid #313244;
+  --noesis-border-active: 1px solid #89b4fa;
+  --noesis-radius-sm: 4px;
+  --noesis-radius-md: 6px;
+  --noesis-radius-lg: 8px;
+  --noesis-radius-pill: 999px;
+
+  /* Shadows & Transitions */
+  --noesis-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.28);
+  --noesis-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --noesis-shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6);
+  --noesis-transition-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
+  --noesis-transition-normal: 200ms cubic-bezier(0.2, 0, 0, 1);
+}

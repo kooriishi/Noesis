@@ -45,3 +45,8 @@ Thumbs.db
 # Temporary & scratch dirs
 /scratch/
 /tmp/
+
+# Evaluation local config and generated reports (Stage C6)
+eval/config.local.json
+eval/out/
+

@@ -5,8 +5,12 @@ import {
   FileNode,
   ProjectMap,
   ExplanationCard,
+  StructuredExplanationResponse,
   RewordingResult,
   ConfusionMark,
+  LearningProfileSummary,
+  ConversationSessionRecord,
+  ConversationMessageRecord,
   LlmConfig,
   ConnectionTestResult,
   SystemStatus,
@@ -15,8 +19,11 @@ import {
   RunRequest,
   RunResponse,
   ExerciseRecord,
+  ExerciseAttemptResult,
   GraphSymbol,
   SymbolNeighborhood,
+  LspServerStatus,
+  LspLocation,
 } from '../types';
 
 const isTauriEnv = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -264,12 +271,187 @@ export const ApiService = {
     ];
   },
 
+  async explainSelectionStructured(
+    config: LlmConfig,
+    filePath: string,
+    snippet: string,
+    startLine: number,
+    endLine: number,
+    forceRefresh: boolean = false
+  ): Promise<StructuredExplanationResponse> {
+    const fallbackCards = await this.explainCode(filePath, snippet, startLine, endLine);
+    if (isTauriEnv()) {
+      const raw: any = await invoke('explain_selection_structured', {
+        config,
+        filePath,
+        snippet,
+        startLine,
+        endLine,
+        forceRefresh,
+      });
+
+      const exp = raw?.explanation;
+      const perspectives: Array<'overall' | 'logic' | 'syntax' | 'principle'> = [
+        'overall',
+        'logic',
+        'syntax',
+        'principle',
+      ];
+      let hasAiCards = false;
+      if (exp) {
+        const topCitations: any[] = Array.isArray(exp.citations) ? exp.citations : [];
+        const citById = new Map<string, any>();
+        for (const c of topCitations) {
+          if (c && c.id) citById.set(c.id, c);
+        }
+
+        for (const p of perspectives) {
+          const sec = exp[p];
+          const card = fallbackCards.find((c) => c.perspective === p);
+          if (sec && card) {
+            if (sec.title) card.title = sec.title;
+            if (sec.one_sentence) card.one_sentence = sec.one_sentence;
+            const cardCitations: any[] = [];
+            if (Array.isArray(sec.bullets) && sec.bullets.length > 0) {
+              card.key_bullets = sec.bullets.map((b: any) => {
+                if (typeof b === 'string') return b;
+                if (b?.kind === 'knowledge' && b?.pack_ref) {
+                  cardCitations.push({
+                    kind: 'knowledge',
+                    pack_ref: b.pack_ref,
+                    verification_status: 'knowledge',
+                    verified: b.status === 'knowledge' || b.status === 'verified',
+                    note: b.text,
+                  });
+                }
+                if (Array.isArray(b?.cites)) {
+                  for (const cid of b.cites) {
+                    const target = citById.get(cid);
+                    if (target) {
+                      cardCitations.push({
+                        kind: 'code',
+                        file: target.file,
+                        line_start: target.line_start,
+                        line_end: target.line_end,
+                        quote: target.quote,
+                        verification_status:
+                          target.status === 'verified'
+                            ? 'verified'
+                            : target.status === 'corrected'
+                            ? 'corrected'
+                            : 'unverified',
+                        verified: target.status === 'verified' || target.status === 'corrected',
+                        corrected_line_start: target.corrected_line_start,
+                        corrected_line_end: target.corrected_line_end,
+                        note: target.reason || target.quote,
+                      });
+                    }
+                  }
+                }
+                return b?.text || String(b);
+              });
+            }
+            if (sec.detail) card.detailed_body = sec.detail;
+            if (cardCitations.length > 0) {
+              card.citations = cardCitations;
+            }
+            card.is_template = false;
+            hasAiCards = true;
+          }
+        }
+      }
+
+      const rawManifest = raw?.manifest || {};
+      const manifest: any = {
+        basis_hash: rawManifest.basis_hash || 'verified-ctx',
+        total_tokens: rawManifest.total_tokens || 0,
+        budget_tokens: rawManifest.budget_tokens || 16000,
+        injected_knowledge_ids: rawManifest.loaded_knowledge_packs || [],
+        layers: [
+          {
+            layer: 'P0',
+            label: '内置知识包',
+            included: (rawManifest.loaded_knowledge_packs || []).length > 0,
+            tokens: 0,
+            trimmed: false,
+            summary:
+              (rawManifest.loaded_knowledge_packs || []).join(', ') || '通用导读提示词',
+          },
+          {
+            layer: 'P1',
+            label: '当前选区代码',
+            included: true,
+            tokens: rawManifest.total_tokens || 0,
+            trimmed: false,
+            summary: `${filePath}:${startLine}-${endLine}`,
+          },
+          {
+            layer: 'P2',
+            label: '领域语义事实',
+            included: (rawManifest.domain_facts || []).length > 0,
+            tokens: 0,
+            trimmed: false,
+            summary: `${(rawManifest.domain_facts || []).length} 条实体/拓扑事实`,
+          },
+          {
+            layer: 'P3-P4',
+            label: '所属符号与 1-hop 邻域',
+            included: Boolean(rawManifest.enclosing_symbol),
+            tokens: 0,
+            trimmed: (raw?.dropped || []).length > 0,
+            summary: rawManifest.enclosing_symbol || `${(rawManifest.neighbors || []).length} 个邻接符号`,
+          },
+          {
+            layer: 'P6',
+            label: '个人学习画像注入',
+            included: Boolean(rawManifest.learning_profile_injected),
+            tokens: 0,
+            trimmed: false,
+            summary: rawManifest.learning_profile_injected ? '已按过往卡点定制' : '无历史卡点',
+          },
+        ],
+      };
+
+      return {
+        cards: fallbackCards,
+        manifest,
+        from_cache: Boolean(raw?.cached),
+        is_template: !hasAiCards,
+        warning: !hasAiCards && raw?.raw_unverified_output ? 'AI 返回内容未能解析为结构化四层卡片，已回退模板占位' : undefined,
+      };
+    }
+
+    return {
+      cards: fallbackCards,
+      manifest: {
+        basis_hash: 'mock-basis-hash',
+        total_tokens: 420,
+        budget_tokens: 6000,
+        layers: [
+          { layer: 'P0', label: '系统提示词与内置知识卡片', included: true, tokens: 180, trimmed: false, summary: '已注入 2 张领域知识卡片' },
+          { layer: 'P1', label: '当前选区代码 (带行号)', included: true, tokens: 240, trimmed: false, summary: `${filePath}:${startLine}-${endLine}` },
+        ],
+        injected_knowledge_ids: [],
+      },
+      from_cache: false,
+      is_template: true,
+    };
+  },
+
+  async cancelLlmRequest(requestId: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('cancel_llm_request', { requestId });
+    }
+    return false;
+  },
+
   async markConfusion(
     filePath: string,
     startLine: number,
     endLine: number,
     snippet: string,
-    category: string
+    category: string,
+    reexplainLevel: number = 1
   ): Promise<RewordingResult> {
     if (isTauriEnv()) {
       return await invoke<RewordingResult>('mark_confusion', {
@@ -278,16 +460,53 @@ export const ApiService = {
         endLine,
         snippet,
         category,
+        userNote: `level:${reexplainLevel}`,
       });
     }
     return {
       mark_id: `mock-mark-${Date.now()}`,
       original_category: category,
+      reexplain_level: reexplainLevel,
       analogy: '把它想象成水流阀门...',
       minimal_example: 'if (!ok) return;',
       prerequisite_concept: '卫语句',
       guidance: '注意检查条件',
       is_template: true,
+    };
+  },
+
+  async resolveConfusionMark(id: string, level: number = 1): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke<void>('resolve_confusion_mark', { id, level, resolved: true });
+    }
+  },
+
+  async getLearningProfile(): Promise<LearningProfileSummary> {
+    if (isTauriEnv()) {
+      const items: any[] = await invoke<any[]>('get_learning_profile');
+      const counts: Record<string, number> = {};
+      let openMarks = 0;
+      let resolvedMarks = 0;
+      for (const item of items || []) {
+        const key = item.concept_key || item.domain || 'general';
+        counts[key] = (counts[key] || 0) + (item.confused_count || 0);
+        openMarks += item.confused_count || 0;
+        resolvedMarks += item.understood_count || 0;
+      }
+      return {
+        total_marks: openMarks + resolvedMarks,
+        open_marks: openMarks,
+        resolved_marks: resolvedMarks,
+        counts_by_type: counts,
+        recent_open_summaries: [],
+      };
+    }
+    return {
+      total_marks: 0,
+      open_marks: 0,
+      resolved_marks: 0,
+      counts_by_type: {},
+      recent_open_summaries: [],
     };
   },
 
@@ -310,6 +529,102 @@ export const ApiService = {
       return await invoke<ConfusionMark[]>('get_confusion_marks', { filePath });
     }
     return [];
+  },
+
+  async listConversations(): Promise<ConversationSessionRecord[]> {
+    if (isTauriEnv()) {
+      const list: any[] = await invoke<any[]>('list_conversations');
+      return (list || []).map((c) => ({
+        id: c.id,
+        project_id: c.project_id,
+        title: c.title,
+        rolling_summary: c.summary,
+        created_at: new Date((c.created_at || 0) * 1000).toISOString(),
+        updated_at: new Date((c.updated_at || 0) * 1000).toISOString(),
+      }));
+    }
+    return [];
+  },
+
+  async createConversation(title?: string): Promise<ConversationSessionRecord> {
+    if (isTauriEnv()) {
+      const c: any = await invoke<any>('create_conversation', { title: title || '新对话' });
+      return {
+        id: c.id,
+        project_id: c.project_id,
+        title: c.title,
+        rolling_summary: c.summary,
+        created_at: new Date((c.created_at || 0) * 1000).toISOString(),
+        updated_at: new Date((c.updated_at || 0) * 1000).toISOString(),
+      };
+    }
+    const now = new Date().toISOString();
+    return {
+      id: `conv-${Date.now()}`,
+      project_id: 'default',
+      title: title || '新对话',
+      created_at: now,
+      updated_at: now,
+    };
+  },
+
+  async loadConversationMessages(conversationId: string): Promise<ConversationMessageRecord[]> {
+    if (isTauriEnv()) {
+      const list: any[] = await invoke<any[]>('load_conversation_messages', {
+        conversationId,
+        limit: 50,
+      });
+      return (list || []).map((m) => ({
+        id: m.id,
+        conversation_id: m.conversation_id,
+        role: m.role,
+        content: m.content,
+        citations_json: m.meta_json,
+        token_est: m.tokens || 0,
+        created_at: new Date((m.created_at || 0) * 1000).toISOString(),
+      }));
+    }
+    return [];
+  },
+
+  async appendConversationMessage(
+    conversationId: string,
+    role: string,
+    content: string,
+    citationsJson?: string
+  ): Promise<ConversationMessageRecord> {
+    if (isTauriEnv()) {
+      const m: any = await invoke<any>('append_conversation_message', {
+        conversationId,
+        role,
+        content,
+        metaJson: citationsJson,
+      });
+      return {
+        id: m.id,
+        conversation_id: m.conversation_id,
+        role: m.role,
+        content: m.content,
+        citations_json: m.meta_json,
+        token_est: m.tokens || 0,
+        created_at: new Date((m.created_at || 0) * 1000).toISOString(),
+      };
+    }
+    return {
+      id: `msg-${Date.now()}`,
+      conversation_id: conversationId,
+      role,
+      content,
+      citations_json: citationsJson,
+      token_est: Math.ceil(content.length / 4),
+      created_at: new Date().toISOString(),
+    };
+  },
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke<void>('delete_conversation', { id: conversationId });
+    }
   },
 
   async previewOutbound(config: LlmConfig, messages: ChatMessage[]): Promise<OutboundPreview> {
@@ -352,6 +667,65 @@ export const ApiService = {
       return await invoke<ExerciseRecord[]>('list_due_reviews');
     }
     return [];
+  },
+
+  async generateProjectExercises(): Promise<ExerciseRecord[]> {
+    if (isTauriEnv()) {
+      return await invoke<ExerciseRecord[]>('generate_project_exercises');
+    }
+    return [];
+  },
+
+  async submitExerciseAnswer(
+    exerciseId: string,
+    userAnswer: string,
+    quality: number
+  ): Promise<ExerciseAttemptResult> {
+    if (isTauriEnv()) {
+      return await invoke<ExerciseAttemptResult>('submit_exercise_answer', {
+        exerciseId,
+        userAnswer,
+        quality,
+      });
+    }
+    return {
+      exercise_id: exerciseId,
+      is_correct: true,
+      quality,
+      score: 1,
+      feedback: '回答正确！',
+      next_interval_days: 1,
+      next_ease_factor: 2.5,
+      next_review_at: new Date().toISOString(),
+    };
+  },
+
+  async detectLspServers(): Promise<LspServerStatus[]> {
+    if (isTauriEnv()) {
+      return await invoke<LspServerStatus[]>('detect_lsp_servers');
+    }
+    return [];
+  },
+
+  async lspFindDefinition(symbolId: string): Promise<LspLocation | null> {
+    if (isTauriEnv()) {
+      return await invoke<LspLocation | null>('lsp_find_definition', { symbolId });
+    }
+    return null;
+  },
+
+  async lspFindReferences(symbolId: string): Promise<LspLocation[]> {
+    if (isTauriEnv()) {
+      return await invoke<LspLocation[]>('lsp_find_references', { symbolId });
+    }
+    return [];
+  },
+
+  async lspGetHover(symbolId: string): Promise<string | null> {
+    if (isTauriEnv()) {
+      return await invoke<string | null>('lsp_get_hover', { symbolId });
+    }
+    return null;
   },
 
   async getExpertSystemPrompt(): Promise<string> {

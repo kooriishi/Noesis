@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use thiserror::Error;
 
+pub mod stream;
+pub mod tools;
+
 #[derive(Error, Debug)]
 pub enum LlmError {
     #[error("Outbound policy violation: {0}")]
@@ -438,6 +441,43 @@ impl LlmGateway {
         &self.filter
     }
 
+    /// Builds a `reqwest::Client` honoring `config.proxy_url` (or system env `HTTPS_PROXY`/`HTTP_PROXY`)
+    /// and `config.custom_ca_cert_path` (PEM root CA), without ever disabling TLS verification (Stage E3).
+    pub fn build_http_client(&self, config: &LlmConfig) -> Result<reqwest::Client, LlmError> {
+        if config.proxy_url.is_none() && config.custom_ca_cert_path.is_none() {
+            return Ok(self.client.clone());
+        }
+
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60));
+
+        if let Some(ref proxy_str) = config.proxy_url {
+            let trimmed = proxy_str.trim();
+            if !trimmed.is_empty() {
+                let proxy = reqwest::Proxy::all(trimmed).map_err(|e| {
+                    LlmError::Api(format!("代理地址 '{}' 格式无效: {}", trimmed, e))
+                })?;
+                builder = builder.proxy(proxy);
+            }
+        }
+
+        if let Some(ref ca_path) = config.custom_ca_cert_path {
+            let trimmed = ca_path.trim();
+            if !trimmed.is_empty() {
+                let pem_bytes = fs::read(trimmed).map_err(|e| {
+                    LlmError::Api(format!("无法读取企业根证书 PEM 文件 '{}': {}", trimmed, e))
+                })?;
+                let cert = reqwest::Certificate::from_pem(&pem_bytes).map_err(|e| {
+                    LlmError::Api(format!("解析企业根证书 PEM 文件 '{}' 失败: {}", trimmed, e))
+                })?;
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+
+        builder.build().map_err(LlmError::Network)
+    }
+
     pub async fn send_chat(
         &self,
         config: &LlmConfig,
@@ -472,6 +512,7 @@ impl LlmGateway {
             ));
         }
 
+        let client = self.build_http_client(config)?;
         let base = config.api_url.trim_end_matches('/');
         let url = if base.ends_with("/chat/completions") {
             base.to_string()
@@ -486,10 +527,7 @@ impl LlmGateway {
             "stream": false
         });
 
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json");
+        let mut req_builder = client.post(&url).header("Content-Type", "application/json");
 
         if !config.api_key.trim().is_empty() {
             req_builder =
@@ -528,6 +566,19 @@ impl LlmGateway {
             };
         }
 
+        let client = match self.build_http_client(config) {
+            Ok(c) => c,
+            Err(e) => {
+                return ConnectionTestResult {
+                    ok: false,
+                    status_code: None,
+                    latency_ms: 0,
+                    category: "config".to_string(),
+                    message: format!("网络客户端初始化失败: {}", e),
+                };
+            }
+        };
+
         let start = Instant::now();
         let base = config.api_url.trim_end_matches('/');
         let url = if base.ends_with("/chat/completions") {
@@ -538,15 +589,12 @@ impl LlmGateway {
 
         let body = serde_json::json!({
             "model": config.model,
-            "messages": [{"role": "user", "content": "ping"}],
+            "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 4,
             "stream": false
         });
 
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json");
+        let mut req_builder = client.post(&url).header("Content-Type", "application/json");
         if !config.api_key.trim().is_empty() {
             req_builder =
                 req_builder.header("Authorization", format!("Bearer {}", config.api_key.trim()));
@@ -562,7 +610,10 @@ impl LlmGateway {
                         status_code: Some(code),
                         latency_ms,
                         category: "ok".to_string(),
-                        message: format!("连接成功 (HTTP {}, {} ms)", code, latency_ms),
+                        message: format!(
+                            "DNS 解析 ✓ | TCP/TLS 握手 ✓ | 鉴权 ✓ | 模型 `{}` 补全响应 ✓ (HTTP {}, {} ms)",
+                            config.model, code, latency_ms
+                        ),
                     }
                 } else if code == 401 || code == 403 {
                     ConnectionTestResult {
@@ -570,7 +621,29 @@ impl LlmGateway {
                         status_code: Some(code),
                         latency_ms,
                         category: "auth".to_string(),
-                        message: format!("鉴权失败 (HTTP {})：请检查 API Key 是否有效", code),
+                        message: format!(
+                            "TCP/TLS 握手 ✓ | 鉴权失败 (HTTP {})：请检查 API Key 是否有效",
+                            code
+                        ),
+                    }
+                } else if code == 404 {
+                    ConnectionTestResult {
+                        ok: false,
+                        status_code: Some(code),
+                        latency_ms,
+                        category: "model_not_found".to_string(),
+                        message: format!(
+                            "网关连接 ✓ | 模型或接口路径不存在 (HTTP 404)：请核对 Base URL 与模型名 `{}`",
+                            config.model
+                        ),
+                    }
+                } else if code == 429 {
+                    ConnectionTestResult {
+                        ok: false,
+                        status_code: Some(code),
+                        latency_ms,
+                        category: "rate_limit".to_string(),
+                        message: "网关连接 ✓ | 触发速率限制 (HTTP 429)：请稍后重试".to_string(),
                     }
                 } else {
                     let text = resp.text().await.unwrap_or_default();

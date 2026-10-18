@@ -143,6 +143,40 @@ export interface ProjectMap {
 
 export type PerspectiveType = 'overall' | 'logic' | 'syntax' | 'principle';
 
+export type CitationVerificationStatus = 'verified' | 'corrected' | 'unverified' | 'knowledge';
+
+export interface CitationItem {
+  kind: 'code' | 'knowledge';
+  file?: string;
+  line_start?: number;
+  line_end?: number;
+  symbol?: string;
+  quote?: string;
+  pack_ref?: string;
+  verification_status: CitationVerificationStatus;
+  verified: boolean;
+  corrected_line_start?: number;
+  corrected_line_end?: number;
+  note?: string;
+}
+
+export interface ContextLayerManifestItem {
+  layer: string;
+  label: string;
+  included: boolean;
+  tokens: number;
+  trimmed: boolean;
+  summary: string;
+}
+
+export interface ContextManifest {
+  basis_hash: string;
+  total_tokens: number;
+  budget_tokens: number;
+  layers: ContextLayerManifestItem[];
+  injected_knowledge_ids: string[];
+}
+
 export interface SourceRef {
   file_path: string;
   line_start: number;
@@ -159,17 +193,34 @@ export interface ExplanationCard {
   detailed_body: string;
   source: SourceRef;
   source_matches: boolean;
+  citations?: CitationItem[];
+  basis_hash?: string;
+  model?: string;
+  prompt_version?: string;
   is_template?: boolean;
   is_expanded?: boolean;
+}
+
+export interface StructuredExplanationResponse {
+  cards: ExplanationCard[];
+  manifest: ContextManifest;
+  from_cache: boolean;
+  is_template: boolean;
+  warning?: string;
 }
 
 export interface RewordingResult {
   mark_id?: string;
   original_category: string;
+  reexplain_level?: number;
   analogy: string;
   minimal_example: string;
   prerequisite_concept: string;
   guidance: string;
+  self_check_question?: string;
+  self_check_answer?: string;
+  citations?: CitationItem[];
+  similarity_warning?: string;
   is_template?: boolean;
 }
 
@@ -182,9 +233,39 @@ export interface ConfusionMark {
   code_snippet: string;
   category: string;
   confusion_type?: string;
+  status?: string;
+  reexplain_level?: number;
   explanation?: string;
   ai_explanation?: string;
   model?: string;
+  created_at: string;
+  resolved_at?: string;
+}
+
+export interface LearningProfileSummary {
+  total_marks: number;
+  open_marks: number;
+  resolved_marks: number;
+  counts_by_type: Record<string, number>;
+  recent_open_summaries: string[];
+}
+
+export interface ConversationSessionRecord {
+  id: string;
+  project_id: string;
+  title: string;
+  rolling_summary?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessageRecord {
+  id: string;
+  conversation_id: string;
+  role: string;
+  content: string;
+  citations_json?: string;
+  token_est: number;
   created_at: string;
 }
 
@@ -257,4 +338,33 @@ export interface ExerciseRecord {
   next_review_at: string;
   repetition: number;
   interval_days: number;
+  ease_factor?: number;
+}
+
+export interface ExerciseAttemptResult {
+  exercise_id: string;
+  is_correct: boolean;
+  quality: number;
+  score: number;
+  feedback: string;
+  next_interval_days: number;
+  next_ease_factor: number;
+  next_review_at: string;
+}
+
+export interface LspServerStatus {
+  language: string;
+  binary: string;
+  installed: boolean;
+  install_hint: string;
+}
+
+export interface LspLocation {
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  col_start: number;
+  col_end: number;
+  confidence: string;
+  source: string;
 }
