@@ -77,6 +77,9 @@ function buildArArchive(members) {
 }
 
 const rootDir = process.cwd();
+const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+const version = pkg.version || '0.1.1';
+
 const elfPath = path.join(
   rootDir,
   'src-tauri',
@@ -119,7 +122,7 @@ const installedSizeKb = Math.ceil(
 );
 
 const controlFile = `Package: noesis
-Version: 0.1.0
+Version: ${version}
 Section: devel
 Priority: optional
 Architecture: amd64
@@ -166,28 +169,28 @@ const debArchive = buildArArchive([
   { name: 'data.tar.gz', data: dataTarGz },
 ]);
 
-const debPath = path.join(outDir, 'noesis_0.1.0_amd64.deb');
+const debPath = path.join(outDir, `noesis_${version}_amd64.deb`);
 fs.writeFileSync(debPath, debArchive);
 
 const installSh = `#!/usr/bin/env bash
 set -e
 PREFIX="\${PREFIX:-/usr/local}"
-echo "Installing Noesis v0.1.0 to \$PREFIX..."
+echo "Installing Noesis v${version} to \$PREFIX..."
 install -Dm755 ./noesis "\$PREFIX/bin/noesis"
 install -Dm644 ./noesis.desktop /usr/share/applications/noesis.desktop 2>/dev/null || true
 install -Dm644 ./noesis.png /usr/share/icons/hicolor/128x128/apps/noesis.png 2>/dev/null || true
-echo "Noesis v0.1.0 installed! Run 'noesis' to start."
+echo "Noesis v${version} installed! Run 'noesis' to start."
 `;
 
 const tarGzBundle = buildTarGz([
-  { name: 'noesis-0.1.0-linux-x86_64/', type: 'dir', mode: 0o755 },
-  { name: 'noesis-0.1.0-linux-x86_64/noesis', data: elfBytes, mode: 0o755 },
-  { name: 'noesis-0.1.0-linux-x86_64/install.sh', data: Buffer.from(installSh, 'utf8'), mode: 0o755 },
-  { name: 'noesis-0.1.0-linux-x86_64/noesis.desktop', data: desktopBytes, mode: 0o644 },
-  { name: 'noesis-0.1.0-linux-x86_64/noesis.png', data: iconBytes, mode: 0o644 },
+  { name: `noesis-${version}-linux-x86_64/`, type: 'dir', mode: 0o755 },
+  { name: `noesis-${version}-linux-x86_64/noesis`, data: elfBytes, mode: 0o755 },
+  { name: `noesis-${version}-linux-x86_64/install.sh`, data: Buffer.from(installSh, 'utf8'), mode: 0o755 },
+  { name: `noesis-${version}-linux-x86_64/noesis.desktop`, data: desktopBytes, mode: 0o644 },
+  { name: `noesis-${version}-linux-x86_64/noesis.png`, data: iconBytes, mode: 0o644 },
 ]);
 
-const tarGzPath = path.join(outDir, 'Noesis_0.1.0_linux_x86_64.tar.gz');
+const tarGzPath = path.join(outDir, `Noesis_${version}_linux_x86_64.tar.gz`);
 fs.writeFileSync(tarGzPath, tarGzBundle);
 
 console.log('Built Linux packages:');

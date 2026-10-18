@@ -42,6 +42,12 @@ pub struct LlmConfig {
     pub custom_ca_cert_path: Option<String>,
     #[serde(default)]
     pub offline_mode: bool,
+    #[serde(default = "default_true")]
+    pub json_mode: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for LlmConfig {
@@ -52,12 +58,13 @@ impl Default for LlmConfig {
             api_key: String::new(),
             model: "deepseek-chat".to_string(),
             temperature: 0.3,
-            max_tokens: 4096,
+            max_tokens: 6144,
             has_api_key: false,
             api_key_masked: String::new(),
             proxy_url: None,
             custom_ca_cert_path: None,
             offline_mode: false,
+            json_mode: true,
         }
     }
 }
@@ -519,13 +526,26 @@ impl LlmGateway {
         } else {
             format!("{}/chat/completions", base)
         };
-        let body = serde_json::json!({
+        let wants_json = config.json_mode
+            && sanitized_messages.iter().any(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("system")
+                    && m.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("JSON") || c.contains("json"))
+                        .unwrap_or(false)
+            });
+
+        let mut body_val = serde_json::json!({
             "model": config.model,
             "messages": sanitized_messages,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
             "stream": false
         });
+
+        if wants_json {
+            body_val["response_format"] = serde_json::json!({ "type": "json_object" });
+        }
 
         let mut req_builder = client.post(&url).header("Content-Type", "application/json");
 
@@ -534,11 +554,28 @@ impl LlmGateway {
                 req_builder.header("Authorization", format!("Bearer {}", config.api_key.trim()));
         }
 
-        let resp = req_builder.json(&body).send().await?;
+        let resp = req_builder.json(&body_val).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
+            // Fallback retry if gateway returns 400 regarding response_format
+            if status.as_u16() == 400 && wants_json && err_text.contains("response_format") {
+                body_val.as_object_mut().map(|obj| obj.remove("response_format"));
+                let mut retry_builder = client.post(&url).header("Content-Type", "application/json");
+                if !config.api_key.trim().is_empty() {
+                    retry_builder = retry_builder.header("Authorization", format!("Bearer {}", config.api_key.trim()));
+                }
+                let retry_resp = retry_builder.json(&body_val).send().await?;
+                if retry_resp.status().is_success() {
+                    let res_json: serde_json::Value = retry_resp.json().await?;
+                    let content = res_json["choices"][0]["message"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    return Ok(content);
+                }
+            }
             return Err(LlmError::Api(format!(
                 "API 请求失败 (HTTP {}): {}",
                 status.as_u16(),
@@ -553,6 +590,95 @@ impl LlmGateway {
             .to_string();
 
         Ok(content)
+    }
+
+    pub async fn send_chat_stream<F>(
+        &self,
+        config: &LlmConfig,
+        messages: Vec<ChatMessage>,
+        mut on_delta: F,
+    ) -> Result<String, LlmError>
+    where
+        F: FnMut(&str) + Send,
+    {
+        if config.offline_mode {
+            return Err(LlmError::OutboundBlocked(
+                "当前处于完全离线模式 (Offline Mode)，已禁止任何外部网络请求。".to_string(),
+            ));
+        }
+
+        let _ = self.filter.inspect_outbound(config, &messages)?;
+
+        let sanitized_messages: Vec<serde_json::Value> = messages
+            .into_iter()
+            .map(|m| {
+                let (clean, _) = self.filter.sanitize_text(&m.content);
+                serde_json::json!({
+                    "role": m.role,
+                    "content": clean
+                })
+            })
+            .collect();
+
+        if config.api_key.trim().is_empty() && config.provider != "ollama" {
+            return Err(LlmError::Api(
+                "未配置模型 API Key。请点击右上角「设置」或在右侧「模型/安全」面板中配置有效的 API 密钥。"
+                    .to_string(),
+            ));
+        }
+
+        let client = self.build_http_client(config)?;
+        let base = config.api_url.trim_end_matches('/');
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{}/chat/completions", base)
+        };
+        let body_val = serde_json::json!({
+            "model": config.model,
+            "messages": sanitized_messages,
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "stream": true
+        });
+
+        let mut req_builder = client.post(&url).header("Content-Type", "application/json");
+        if !config.api_key.trim().is_empty() {
+            req_builder =
+                req_builder.header("Authorization", format!("Bearer {}", config.api_key.trim()));
+        }
+
+        let resp = req_builder.json(&body_val).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api(format!(
+                "API 请求失败 (HTTP {}): {}",
+                status.as_u16(),
+                err_text
+            )));
+        }
+
+        let mut parser = crate::stream::SseByteParser::new();
+        let mut full_text = String::new();
+
+        use futures_util::StreamExt;
+        let mut byte_stream = resp.bytes_stream();
+        while let Some(chunk_res) = byte_stream.next().await {
+            let chunk = chunk_res.map_err(LlmError::Network)?;
+            let batch = parser.feed_bytes(&chunk).map_err(LlmError::Api)?;
+            if !batch.content_delta.is_empty() {
+                full_text.push_str(&batch.content_delta);
+                on_delta(&batch.content_delta);
+            }
+        }
+        let final_batch = parser.finish().map_err(LlmError::Api)?;
+        if !final_batch.content_delta.is_empty() {
+            full_text.push_str(&final_batch.content_delta);
+            on_delta(&final_batch.content_delta);
+        }
+
+        Ok(full_text)
     }
 
     pub async fn test_connection(&self, config: &LlmConfig) -> ConnectionTestResult {

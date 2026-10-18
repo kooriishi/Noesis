@@ -5,6 +5,7 @@ use thiserror::Error;
 pub mod context;
 pub mod exercises;
 pub mod knowledge;
+pub mod quality;
 pub mod verifier;
 
 #[derive(Error, Debug)]

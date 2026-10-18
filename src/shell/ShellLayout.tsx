@@ -13,6 +13,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   AlertTriangle,
+  BookOpen,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { CodeEditor, evictEditorStateCache } from '../editor/CodeEditor';
@@ -20,6 +21,7 @@ import { ProjectSidebar } from '../sidebar-project/ProjectSidebar';
 import { AiSidebar } from '../sidebar-ai/AiSidebar';
 import { ScratchRunner } from '../scratch/ScratchRunner';
 import { SettingsModal } from './SettingsModal';
+import { useToast } from '../components/feedback';
 import { extractJsonObject } from '../utils/llmJson';
 import {
   FileNode,
@@ -151,6 +153,13 @@ export const ShellLayout: React.FC = () => {
   const [dueReviews, setDueReviews] = useState<ExerciseRecord[]>([]);
   const [isExplaining, setIsExplaining] = useState<boolean>(false);
   const [activeSidebarTab, setActiveSidebarTab] = useState<'cards' | 'confusion' | 'chat' | 'settings'>('cards');
+  const toast = useToast();
+  const [contextChip, setContextChip] = useState<{
+    file: string;
+    range: [number, number];
+    snippet: string;
+  } | null>(null);
+  const [currentExplanationId, setCurrentExplanationId] = useState<string | undefined>(undefined);
 
   // Scratchpad State
   const [showScratch, setShowScratch] = useState<boolean>(false);
@@ -249,6 +258,7 @@ export const ShellLayout: React.FC = () => {
 
       const tree = await ApiService.openProject(targetPath);
       setCurrentProject(tree);
+      toast.success(`成功载入项目: ${tree.name || targetPath}`);
 
       // When switching to a new project directory, clear stale tabs from previous workspace
       evictEditorStateCache();
@@ -264,6 +274,7 @@ export const ShellLayout: React.FC = () => {
       await handleTriggerIndex();
     } catch (err: any) {
       console.error('Failed to open project:', err);
+      toast.error(`打开工程失败: ${err?.message || String(err)}`);
     }
   };
 
@@ -335,6 +346,7 @@ export const ShellLayout: React.FC = () => {
       setActiveTabPath(filePath);
     } catch (err: any) {
       console.error('Failed to read file:', err);
+      toast.error(`无法打开文件 ${filePath}: ${err?.message || String(err)}`);
     }
   };
 
@@ -407,8 +419,9 @@ export const ShellLayout: React.FC = () => {
           t.path === activeTab.path ? { ...t, content: contentToSave, isDirty: false } : t
         )
       );
+      toast.success(`文件已保存: ${activeTab.name}`);
     } catch (err: any) {
-      alert(`保存失败: ${err}`);
+      toast.error(`保存失败: ${err?.message || String(err)}`);
     }
   };
 
@@ -419,12 +432,15 @@ export const ShellLayout: React.FC = () => {
       const map = await ApiService.indexProject();
       setProjectMap(map);
       setLastIndexedAt(new Date().toLocaleTimeString());
+      toast.success(`工程索引完成：解析出 ${map.total_symbols} 个符号`);
       // Automatically generate deterministic fact & cloze exercises from project graph (Stage D)
       await ApiService.generateProjectExercises().catch(() => {});
       await loadDueReviews();
     } catch (err: any) {
       console.error('Index failed:', err);
-      setIndexError(err?.message || String(err));
+      const msg = err?.message || String(err);
+      setIndexError(msg);
+      toast.error(`索引构建失败: ${msg}`);
     } finally {
       setIsIndexing(false);
     }
@@ -434,7 +450,8 @@ export const ShellLayout: React.FC = () => {
     snippet: string,
     startLine: number,
     endLine: number,
-    forceRefresh: boolean = false
+    forceRefresh: boolean = false,
+    depthMode: 'standard' | 'deep' = 'standard'
   ) => {
     if (!activeTab) return;
     setRightCollapsed(false);
@@ -451,12 +468,14 @@ export const ShellLayout: React.FC = () => {
         snippet,
         startLine,
         endLine,
-        forceRefresh
+        forceRefresh,
+        depthMode
       );
 
       setCards(structured.cards);
       setContextManifest(structured.manifest);
       setFromCache(structured.from_cache);
+      setCurrentExplanationId(structured.explanation_id);
       if (structured.warning) {
         setExplainError(structured.warning);
       }
@@ -473,21 +492,41 @@ export const ShellLayout: React.FC = () => {
       } catch {
         // ignore
       }
-      setExplainError(`解读生成遇到异常: ${err?.message || String(err)}`);
+      const msg = err?.message || String(err);
+      setExplainError(`解读生成遇到异常: ${msg}`);
+      toast.error(`解读生成失败: ${msg}`);
     } finally {
       setIsExplaining(false);
     }
   };
 
-  const handleRetryExplain = (forceRefresh: boolean = true) => {
+  const handleRetryExplain = (forceRefresh: boolean = true, depthMode: 'standard' | 'deep' = 'standard') => {
     if (lastExplainSelection) {
       handleExplainSelection(
         lastExplainSelection.snippet,
         lastExplainSelection.startLine,
         lastExplainSelection.endLine,
-        forceRefresh
+        forceRefresh,
+        depthMode
       );
     }
+  };
+
+  const handleAskSelection = (snippet: string, startLine: number, endLine: number) => {
+    if (!activeTab) return;
+    setContextChip({
+      file: activeTab.path,
+      range: [startLine, endLine],
+      snippet: snippet,
+    });
+    setRightCollapsed(false);
+    setActiveSidebarTab('chat');
+  };
+
+  const handleLoadHistoryExplanation = (loadedCards: ExplanationCard[], manifest?: ContextManifest) => {
+    setCards(loadedCards);
+    if (manifest) setContextManifest(manifest);
+    setFromCache(true);
   };
 
   const handleMarkConfusion = async (
@@ -570,8 +609,9 @@ ${snippet}
 
       setActiveRewording(rewording);
       await loadConfusionMarks();
+      toast.success('已标记代码卡点并生成针对性通俗重讲');
     } catch (err: any) {
-      alert(`标记卡点失败: ${err}`);
+      toast.error(`标记卡点失败: ${err?.message || String(err)}`);
     }
   };
 
@@ -622,8 +662,8 @@ ${snippet}
     return await ApiService.previewOutbound(llmConfig, messages);
   };
 
-  const handleMarkCardFeedback = (cardId: string, type: 'helpful' | 'too_generic' | 'error') => {
-    alert(`卡片 [${cardId}] 反馈已记录: [${type}]。已录入本地评测基线！`);
+  const handleMarkCardFeedback = (_cardId: string, _type: 'helpful' | 'too_generic' | 'error') => {
+    toast.success('卡片反馈已记录，已沉淀至本地评测基线！');
   };
 
   const isKeyConfigured = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5);
@@ -743,6 +783,42 @@ ${snippet}
           >
             <Terminal size={13} />
             草稿沙盒
+          </button>
+
+          <button
+            onClick={() => setShowScratch(true)}
+            title="间隔复习题库与练习 (F7-g)"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              background: dueReviews.length > 0 ? 'rgba(249, 226, 175, 0.18)' : '#313244',
+              color: dueReviews.length > 0 ? 'var(--noesis-accent-yellow, #f9e2af)' : '#cdd6f4',
+              border: '1px solid',
+              borderColor: dueReviews.length > 0 ? 'var(--noesis-accent-yellow, #f9e2af)' : 'transparent',
+              borderRadius: '4px',
+              padding: '4px 8px',
+              fontSize: '11.5px',
+              cursor: 'pointer',
+              fontWeight: 500,
+            }}
+          >
+            <BookOpen size={13} />
+            <span>复习练习</span>
+            {dueReviews.length > 0 && (
+              <span
+                style={{
+                  background: 'var(--noesis-accent-red, #f38ba8)',
+                  color: '#11111b',
+                  borderRadius: '10px',
+                  padding: '0 5px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                }}
+              >
+                {dueReviews.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -968,6 +1044,7 @@ ${snippet}
                 onSave={handleSaveActiveFile}
                 onExplainSelection={handleExplainSelection}
                 onMarkConfusion={handleMarkConfusion}
+                onAskSelection={handleAskSelection}
                 onSendToScratch={handleSendToScratch}
               />
             ) : (
@@ -1053,6 +1130,10 @@ ${snippet}
             onSendChat={handleSendChat}
             onPreviewOutbound={handlePreviewOutbound}
             onMarkCardFeedback={handleMarkCardFeedback}
+            onLoadHistoryExplanation={handleLoadHistoryExplanation}
+            contextChip={contextChip}
+            onClearContextChip={() => setContextChip(null)}
+            currentExplanationId={currentExplanationId}
           />
         </div>
       </div>

@@ -207,6 +207,9 @@ export interface StructuredExplanationResponse {
   from_cache: boolean;
   is_template: boolean;
   warning?: string;
+  quality?: QualityReport;
+  explanation_id?: string;
+  depth_mode?: 'standard' | 'deep' | string;
 }
 
 export interface RewordingResult {
@@ -368,3 +371,101 @@ export interface LspLocation {
   confidence: string;
   source: string;
 }
+
+export interface QualityReport {
+  overall_score: number;
+  passed: boolean;
+  issues: string[];
+}
+
+export interface ExplanationSummary {
+  id: string;
+  project_id: string;
+  file_path: string;
+  range: string;
+  title: string;
+  selected_preview: string;
+  basis_hash: string;
+  model: string;
+  depth_mode?: 'standard' | 'deep' | string;
+  pinned: boolean;
+  created_at: number;
+  last_opened_at?: number;
+}
+
+export interface PromptPreset {
+  id: string;
+  name: string;
+  scope: 'ask' | 'explain' | 'reexplain' | string;
+  persona_text: string;
+  created_at: number;
+  updated_at: number;
+  is_active: boolean;
+  is_builtin: boolean;
+}
+
+export interface EffectivePromptPreview {
+  scope: string;
+  preset_name: string;
+  l1_persona: string;
+  l0_locked: string;
+  full_prompt: string;
+  token_estimate: number;
+}
+
+export interface ConfusionRevision {
+  id: string;
+  mark_id: string;
+  level: number;
+  created_at: number;
+  model: string;
+  explanation_json: string;
+  annotated_json?: string;
+  similarity_score: number;
+}
+
+export interface AnnotatedLine {
+  line_no: number;
+  code: string;
+  comment: string;
+  is_hard: boolean;
+}
+
+export interface AnnotatedSnippet {
+  lines: AnnotatedLine[];
+  summary: string;
+}
+
+export interface ConfusionDetailResponse {
+  mark: ConfusionMark;
+  revisions: ConfusionRevision[];
+}
+
+export interface AskStreamEvent {
+  type: 'context_ready' | 'token' | 'tool_call' | 'tool_result' | 'citation_check' | 'done' | 'error' | string;
+  token?: string;
+  tool_name?: string;
+  tool_args?: string;
+  tool_result?: string;
+  citations?: CitationItem[];
+  manifest?: ContextManifest;
+  error?: string;
+  conversation_id?: string;
+}
+
+export interface AskPreviewResponse {
+  messages: ChatMessage[];
+  token_estimate: number;
+  manifest: ContextManifest;
+  outbound_preview: OutboundPreview;
+}
+
+export interface FeedbackStats {
+  total: number;
+  helpful: number;
+  too_generic: number;
+  wrong: number;
+  too_generic_rate: number;
+  wrong_rate: number;
+}
+

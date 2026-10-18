@@ -21,7 +21,10 @@ use noesis_lsp::LspManager;
 use noesis_project::ProjectManager;
 use noesis_ros2::Ros2Adapter;
 use noesis_runner::{CodeRunner, RunRequest};
-use noesis_store::{CachedExplanation, ConfusionMark, DbStore, StoredMessageRecord};
+use noesis_store::{
+    CachedExplanation, ConfusionMark, DbStore, ExplanationFeedback, PromptPreset,
+    StoredMessageRecord,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -31,9 +34,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const EXPERT_SYSTEM_PROMPT: &str = include_str!("../../../../prompts/code_guide_expert.system.md");
+const LOCKED_RULES_PROMPT: &str = include_str!("../../../../prompts/rules.locked.md");
+const DEFAULT_PERSONA_PROMPT: &str = include_str!("../../../../prompts/persona.default.md");
 const DIST_INDEX_HTML: &str = include_str!("../../../../dist/index.html");
-const DIST_CSS: &[u8] = include_bytes!("../../../../dist/assets/index-CbmUPwi2.css");
-const DIST_JS: &[u8] = include_bytes!("../../../../dist/assets/index-iEFAoPzU.js");
+const DIST_CSS: &[u8] = include_bytes!("../../../../dist/assets/index-RHt3u671.css");
+const DIST_JS: &[u8] = include_bytes!("../../../../dist/assets/index-BsPZHSTR.js");
 
 const IPC_SHIM_SCRIPT: &str = r#"<script>
 window.__TAURI_INTERNALS__ = {
@@ -49,7 +54,17 @@ window.__TAURI_INTERNALS__ = {
     }
     return payload.result;
   },
-  transformCallback: function() { return 0; },
+  transformCallback: function(callback, once) {
+    const id = window._cb_id = (window._cb_id || 1) + 1;
+    window['_' + id] = (res) => {
+      callback(res);
+      if (once) delete window['_' + id];
+    };
+    return id;
+  },
+  unregisterCallback: function(id) {
+    delete window['_' + id];
+  },
   metadata: {
     currentWindow: { label: 'main' },
     currentWebview: { label: 'main', windowLabel: 'main' }
@@ -365,6 +380,10 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                 .as_bool()
                 .or_else(|| args["force_refresh"].as_bool())
                 .unwrap_or(false);
+            let depth_mode = args["depthMode"]
+                .as_str()
+                .or_else(|| args["depth_mode"].as_str())
+                .map(|s| s.to_string());
 
             let (root_path, project_id) = {
                 let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
@@ -374,23 +393,31 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                     (PathBuf::from("."), "default".to_string())
                 }
             };
-            let effective = state.credentials.resolve_effective_config(&config);
+            let mut effective = state.credentials.resolve_effective_config(&config);
+            if depth_mode.as_deref() == Some("deep") {
+                effective.max_tokens = effective.max_tokens.max(8192);
+            }
+            let active_preset = state.store.get_active_prompt_preset("explain").ok().flatten();
+            let custom_persona = active_preset.map(|p| p.persona_text);
+            let budget_tokens = if depth_mode.as_deref() == Some("deep") { 24000 } else { 16000 };
             let estimator = HeuristicTokenEstimator;
             let ctx_req = ContextRequest {
                 kind: "explain_selection".to_string(),
                 project_id: project_id.clone(),
                 file: Some(file_path.clone()),
                 range: Some((start_line, end_line)),
-                selected_code: Some(snippet),
+                selected_code: Some(snippet.clone()),
                 question: None,
                 entity_ref: None,
                 conversation_id: None,
-                budget_tokens: 16000,
+                budget_tokens,
                 include_learning_profile: true,
                 re_explain_type: None,
                 re_explain_level: None,
                 previous_explanation_summary: None,
                 user_note: None,
+                depth_mode: depth_mode.clone(),
+                custom_persona,
             };
             let pack = ContextAssembler::assemble(
                 &root_path,
@@ -455,10 +482,23 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                     );
                     if let Ok(json_str) = serde_json::to_string(&exp) {
                         let stats_str = serde_json::to_string(&verification).unwrap_or_default();
+                        let title_text = exp.overall.one_sentence.chars().take(40).collect::<String>();
+                        let title = if title_text.trim().is_empty() {
+                            let fn_name = file_path.split('/').next_back().unwrap_or(&file_path);
+                            format!("{}:{}-{}", fn_name, start_line, end_line)
+                        } else {
+                            title_text
+                        };
+                        let preview = snippet.chars().take(200).collect::<String>();
+                        let exp_id = format!(
+                            "exp-{}-{}",
+                            chrono::Utc::now().timestamp_millis(),
+                            &pack.basis_hash[..8.min(pack.basis_hash.len())]
+                        );
                         let _ = state.store.save_explanation_cache(&CachedExplanation {
-                            id: format!("exp-{}", pack.basis_hash),
+                            id: exp_id,
                             project_id,
-                            file_id: file_path,
+                            file_id: file_path.clone(),
                             range: format!("{}-{}", start_line, end_line),
                             basis_hash: pack.basis_hash,
                             prompt_version: PROMPT_VERSION.to_string(),
@@ -467,6 +507,13 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                             json: json_str,
                             stats: stats_str,
                             created_at: chrono::Utc::now().timestamp(),
+                            title: Some(title),
+                            file_path: Some(file_path.clone()),
+                            selected_preview: Some(preview),
+                            pinned: false,
+                            deleted: false,
+                            depth_mode: depth_mode.clone(),
+                            last_opened_at: Some(chrono::Utc::now().timestamp()),
                         });
                     }
                     Ok(serde_json::to_value(StructuredExplainResponse {
@@ -538,6 +585,8 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                 resolved_level: None,
                 user_note,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                review_exercise_id: None,
+                concepts_json: None,
             };
             let _ = state.store.save_mark(&mark);
             Ok(serde_json::to_value(rewording).unwrap())
@@ -837,6 +886,130 @@ async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Va
                 word,
             ))
             .unwrap())
+        }
+        "list_explanations" => {
+            let project_id = {
+                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+                pm_guard
+                    .as_ref()
+                    .map(|pm| pm.normalized_root())
+                    .unwrap_or_else(|| "default".to_string())
+            };
+            let fp = args["filePath"].as_str().or_else(|| args["file_path"].as_str());
+            let q = args["query"].as_str();
+            let pinned = args["pinnedOnly"].as_bool().or_else(|| args["pinned_only"].as_bool()).unwrap_or(false);
+            let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+            let list = state.store.list_explanations(&project_id, fp, q, pinned, limit, offset).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(list).unwrap())
+        }
+        "get_explanation" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let exp = state.store.get_explanation(id).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(exp).unwrap())
+        }
+        "rename_explanation" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let title = args["newTitle"].as_str().or_else(|| args["new_title"].as_str()).unwrap_or_default();
+            state.store.rename_explanation(id, title).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "pin_explanation" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let pinned = args["pinned"].as_bool().unwrap_or(true);
+            state.store.pin_explanation(id, pinned).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "delete_explanation" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            state.store.delete_explanation(id).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "list_prompt_presets" => {
+            let scope = args["scope"].as_str();
+            let list = state.store.list_prompt_presets(scope).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(list).unwrap())
+        }
+        "save_prompt_preset" => {
+            let preset: PromptPreset = serde_json::from_value(args["preset"].clone()).map_err(|e| e.to_string())?;
+            state.store.save_prompt_preset(&preset).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "set_active_prompt_preset" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let scope = args["scope"].as_str().unwrap_or("explain");
+            state.store.set_active_prompt_preset(id, scope).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "delete_prompt_preset" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            state.store.delete_prompt_preset(id).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "reset_prompt_to_default" => {
+            let scope = args["scope"].as_str().unwrap_or("explain");
+            state.store.reset_prompt_to_default(scope).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "preview_effective_prompt" => {
+            let scope = args["scope"].as_str().unwrap_or("explain").to_string();
+            let active = state.store.get_active_prompt_preset(&scope).ok().flatten();
+            let (name, persona) = if let Some(p) = active {
+                (p.name, p.persona_text)
+            } else {
+                ("内置默认".to_string(), DEFAULT_PERSONA_PROMPT.to_string())
+            };
+            let locked = LOCKED_RULES_PROMPT.to_string();
+            let full = format!("{}\n\n---\n\n{}", persona, locked);
+            let est = HeuristicTokenEstimator;
+            let tokens = noesis_learn::context::TokenEstimator::estimate(&est, &full);
+            Ok(json!({
+                "scope": scope,
+                "preset_name": name,
+                "l1_persona": persona,
+                "l0_locked": locked,
+                "full_prompt": full,
+                "token_estimate": tokens
+            }))
+        }
+        "get_confusion_detail" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let res = state.store.get_confusion_detail(id).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
+        "reopen_confusion_mark" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            state.store.reopen_confusion_mark(id).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "delete_confusion_mark" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            state.store.delete_confusion_mark(id).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "submit_explanation_feedback" => {
+            let explanation_id = args["explanationId"].as_str().or_else(|| args["explanation_id"].as_str()).unwrap_or_default().to_string();
+            let card_perspective = args["cardPerspective"].as_str().or_else(|| args["card_perspective"].as_str()).unwrap_or_default().to_string();
+            let feedback = args["feedback"].as_str().unwrap_or_default().to_string();
+            let note = args["note"].as_str().map(|s| s.to_string());
+            let fb = ExplanationFeedback {
+                id: format!("fb-{}", chrono::Utc::now().timestamp_millis()),
+                explanation_id,
+                card_perspective,
+                feedback,
+                note,
+                prompt_version: Some(PROMPT_VERSION.to_string()),
+                model: None,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+            state.store.record_explanation_feedback(&fb).map_err(|e| e.to_string())?;
+            Ok(Value::Bool(true))
+        }
+        "get_feedback_stats" => {
+            let pv = args["promptVersion"].as_str().or_else(|| args["prompt_version"].as_str());
+            let m = args["model"].as_str();
+            let stats = state.store.get_feedback_stats(pv, m).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(stats).unwrap())
         }
         other => Err(format!("Unsupported IPC command: {}", other)),
     }

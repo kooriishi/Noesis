@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { EditorState, Extension } from '@codemirror/state';
-import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
+import { EditorState, Extension, StateEffect, StateField } from '@codemirror/state';
+import {
+  EditorView,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  Decoration,
+  DecorationSet,
+} from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { searchKeymap, search } from '@codemirror/search';
 import { foldGutter, indentOnInput, bracketMatching, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
@@ -13,7 +21,32 @@ import { markdown } from '@codemirror/lang-markdown';
 import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 import { cpp } from '@codemirror/lang-cpp';
-import { Sparkles, HelpCircle, Play, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Sparkles, HelpCircle, Play, CheckCircle2, AlertTriangle, MessageSquare } from 'lucide-react';
+
+export const setHighlightEffect = StateEffect.define<{ fromLine: number; toLine: number } | null>();
+
+export const lineHighlightField = StateField.define<DecorationSet>({
+  create() {
+    return Decoration.none;
+  },
+  update(highlights, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setHighlightEffect)) {
+        if (!e.value) return Decoration.none;
+        const decos = [];
+        for (let l = e.value.fromLine; l <= e.value.toLine; l++) {
+          if (l <= tr.state.doc.lines) {
+            const line = tr.state.doc.line(l);
+            decos.push(Decoration.line({ class: 'cm-jump-highlight' }).range(line.from));
+          }
+        }
+        return Decoration.set(decos, true);
+      }
+    }
+    return highlights.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 const LARGE_FILE_BYTE_THRESHOLD = 1_000_000; // 1 MB guard (Stage E1)
 
@@ -45,6 +78,7 @@ interface CodeEditorProps {
   onContentChange: (newContent: string) => void;
   onSave: (latestContent?: string) => void;
   onExplainSelection: (snippet: string, startLine: number, endLine: number) => void;
+  onAskSelection?: (snippet: string, startLine: number, endLine: number) => void;
   onMarkConfusion: (snippet: string, startLine: number, endLine: number, category: string) => void;
   onSendToScratch: (snippet: string, language: string) => void;
 }
@@ -60,6 +94,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   onContentChange,
   onSave,
   onExplainSelection,
+  onAskSelection,
   onMarkConfusion,
   onSendToScratch,
 }) => {
@@ -209,6 +244,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
       saveKeyBinding,
       updateListener,
+      lineHighlightField,
       EditorView.theme({
         '&': { height: '100%', fontSize: `${fSize}px`, fontFamily: fFamily },
         '.cm-scroller': { overflow: 'auto' },
@@ -318,7 +354,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
   }, [filePath, language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap]);
 
-  // Support jumping to and highlighting a citation line range
+  // Support jumping to and highlighting a citation line range with line pulse fade
   useEffect(() => {
     const view = viewRef.current;
     if (!view || !jumpToRange || jumpToRange.filePath !== filePath) return;
@@ -331,13 +367,25 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     view.dispatch({
       selection: { anchor: fromPos, head: toPos },
-      effects: EditorView.scrollIntoView(fromPos, { y: 'center' }),
+      effects: [
+        EditorView.scrollIntoView(fromPos, { y: 'center' }),
+        setHighlightEffect.of({ fromLine: safeStart, toLine: safeEnd }),
+      ],
     });
     view.focus();
+
+    // Fade out decoration automatically
+    const timer = window.setTimeout(() => {
+      if (viewRef.current) {
+        viewRef.current.dispatch({ effects: setHighlightEffect.of(null) });
+      }
+    }, 1800);
+
+    return () => window.clearTimeout(timer);
   }, [jumpToRange, filePath]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: '#1e1e2e' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--noesis-bg-base, #1e1e2e)' }}>
       {/* Stage E1 Large File Guard Banner */}
       {isReadOnlyLargeMode && (
         <div
@@ -349,7 +397,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             padding: '6px 14px',
             background: 'rgba(249, 226, 175, 0.14)',
             borderBottom: '1px solid rgba(249, 226, 175, 0.35)',
-            color: '#f9e2af',
+            color: 'var(--noesis-accent-yellow, #f9e2af)',
             fontSize: '11.5px',
             flexShrink: 0,
           }}
@@ -364,10 +412,10 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             onClick={() => setForceFullEditMap((prev) => ({ ...prev, [filePath]: true }))}
             style={{
               padding: '3px 10px',
-              background: '#f9e2af',
-              color: '#11111b',
+              background: 'var(--noesis-accent-yellow, #f9e2af)',
+              color: 'var(--noesis-bg-crust, #11111b)',
               border: 'none',
-              borderRadius: '4px',
+              borderRadius: 'var(--noesis-radius-sm, 4px)',
               fontSize: '11px',
               fontWeight: 600,
               cursor: 'pointer',
@@ -392,17 +440,17 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               background: 'rgba(24, 24, 37, 0.95)',
               border: '1px solid rgba(137, 180, 250, 0.5)',
               backdropFilter: 'blur(8px)',
-              borderRadius: '8px',
-              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+              borderRadius: 'var(--noesis-radius-lg, 8px)',
+              boxShadow: 'var(--noesis-shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.45))',
               display: 'flex',
               alignItems: 'center',
-              gap: '8px',
+              gap: '6px',
               padding: '6px 10px',
               zIndex: 50,
-              animation: 'fadeIn 0.15s ease',
+              animation: 'fadeIn var(--noesis-transition-fast, 120ms) ease',
             }}
           >
-            <span style={{ fontSize: '11px', color: '#a6adc8', marginRight: '4px', whiteSpace: 'nowrap' }}>
+            <span style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', marginRight: '4px', whiteSpace: 'nowrap' }}>
               已选 {selection.endLine - selection.startLine + 1} 行
             </span>
             <button
@@ -412,8 +460,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: '#89b4fa',
-                color: '#11111b',
+                background: 'var(--noesis-accent-blue, #89b4fa)',
+                color: 'var(--noesis-bg-crust, #11111b)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -425,6 +473,28 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               <Sparkles size={14} />
               深度解读
             </button>
+            {onAskSelection && (
+              <button
+                onClick={() => onAskSelection(selection.text, selection.startLine, selection.endLine)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  padding: '5px 10px',
+                  background: 'var(--noesis-accent-mauve, #cba6f7)',
+                  color: 'var(--noesis-bg-crust, #11111b)',
+                  border: 'none',
+                  borderRadius: '5px',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <MessageSquare size={14} />
+                智能问答
+              </button>
+            )}
             <button
               onClick={() => setShowConfusionModal(true)}
               style={{
@@ -432,8 +502,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: '#f38ba8',
-                color: '#11111b',
+                background: 'var(--noesis-accent-red, #f38ba8)',
+                color: 'var(--noesis-bg-crust, #11111b)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -452,8 +522,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: '#a6e3a1',
-                color: '#11111b',
+                background: 'var(--noesis-accent-green, #a6e3a1)',
+                color: 'var(--noesis-bg-crust, #11111b)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -467,6 +537,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             </button>
           </div>
         )}
+
 
         {/* Confusion Category Picker Modal */}
         {showConfusionModal && selection && (

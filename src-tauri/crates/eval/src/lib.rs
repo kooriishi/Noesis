@@ -561,4 +561,137 @@ mod tests {
         assert!(out_dir.path().join("report.md").is_file());
         assert!(out_dir.path().join("blind.html").is_file());
     }
+
+    #[test]
+    fn test_depth_quality_gate_6_cases() {
+        use noesis_learn::quality::QualityGate;
+        use noesis_learn::verifier::{ExplanationBullet, ExplanationSection, StructuredExplanation};
+
+        fn bullet(text: &str, kind: &str) -> ExplanationBullet {
+            ExplanationBullet {
+                text: text.to_string(),
+                kind: kind.to_string(),
+                cites: vec![],
+                pack_ref: None,
+                status: String::new(),
+            }
+        }
+
+        let generic_phrases = vec![
+            "实现了相关功能".to_string(),
+            "用于处理相关业务".to_string(),
+            "等等".to_string(),
+        ];
+
+        let cases = [
+            // 1. ROS2 Callback
+            (
+                "sub_ = create_subscription<sensor_msgs::msg::LaserScan>(\"/scan\", 10, std::bind(&LaserNode::cb, this, _1));",
+                "LaserNode",
+                "订阅 /scan 激光雷达点云数据并由执行器调用回调",
+            ),
+            // 2. ROS2 Timer
+            (
+                "timer_ = create_wall_timer(50ms, std::bind(&ControlNode::control_loop, this), cb_group_);",
+                "ControlNode",
+                "配置 20Hz 控制循环定时器并挂载到 MutuallyExclusiveCallbackGroup",
+            ),
+            // 3. ROS2 QoS
+            (
+                "auto qos = rclcpp::SensorDataQoS().keep_last(5).best_effort();",
+                "SensorDataQoS",
+                "采用 Best Effort QoS 保障点云低延迟传输，避免 TCP 重传阻塞",
+            ),
+            // 4. LLM RAG
+            (
+                "let results = vector_store.similarity_search(&query_embedding, top_k).await?; let reranked = reranker.score(&results);",
+                "vector_store",
+                "使用向量相似度召回 top_k 片段并通过交叉编码重排模型精排",
+            ),
+            // 5. LLM Prompt Assembly
+            (
+                "let assembled = PromptBuilder::new().with_system(&sys_prompt).with_context(&rag_chunks).build();",
+                "PromptBuilder",
+                "分层拼装系统提示词与检索上下文，严格隔离不可信代码文本",
+            ),
+            // 6. LLM Streaming
+            (
+                "let mut stream = client.send_chat_stream(&config, messages).await?; while let Some(delta) = stream.next().await { parser.feed(&delta)?; }",
+                "send_chat_stream",
+                "处理 SSE 分块增量流并通过 SseByteParser 解决跨网络包 UTF-8 截断",
+            ),
+        ];
+
+        for (code, ident, topic) in &cases {
+            // A. Generic output must be rejected
+            let shallow = StructuredExplanation {
+                overall: ExplanationSection {
+                    title: "整体".to_string(),
+                    one_sentence: "这段代码实现了相关功能。".to_string(),
+                    bullets: vec![
+                        bullet("用于处理相关业务逻辑，等等。", "code"),
+                    ],
+                    detail: "".to_string(),
+                },
+                ..Default::default()
+            };
+            let shallow_report = QualityGate::evaluate(&shallow, code, Some("standard"), &generic_phrases);
+            assert!(
+                shallow_report.is_shallow,
+                "Case '{}' generic output must fail quality gate",
+                ident
+            );
+
+            // B. Concrete output must pass
+            let concrete = StructuredExplanation {
+                overall: ExplanationSection {
+                    title: "整体".to_string(),
+                    one_sentence: format!("{}在系统中的核心执行逻辑。", topic),
+                    bullets: vec![
+                        bullet(&format!("核心代码依赖标识符 {} 完成核心逻辑调度", ident), "code"),
+                        bullet("衔接上下游数据流向，具有严格的运行周期约束", "code"),
+                        bullet("由框架主循环自动管理生命周期与资源释放", "knowledge"),
+                    ],
+                    detail: format!("### 架构全景\n本段代码位于系统主控管线，通过 `{}` 完成具体调用。其设计权衡在于兼顾吞吐量与实时响应性。", ident),
+                },
+                logic: ExplanationSection {
+                    title: "逻辑".to_string(),
+                    one_sentence: "按序执行初始化、参数校验与异步分发。".to_string(),
+                    bullets: vec![
+                        bullet(&format!("第 1 步：校验 `{}` 句柄是否合法并准备入参", ident), "code"),
+                        bullet("第 2 步：触发核心计算管线并记录运行时状态", "code"),
+                        bullet("第 3 步：向目标队列提交输出并处理潜在异常", "code"),
+                    ],
+                    detail: format!("### 步进分析\n1. 参数校验阶段检查有效性。\n2. 核心调用 `{}` 执行。\n3. 返回结果给下游模块使用。", ident),
+                },
+                syntax: ExplanationSection {
+                    title: "语法".to_string(),
+                    one_sentence: "语言惯用设计范式与类型安全约束。".to_string(),
+                    bullets: vec![
+                        bullet(&format!("采用类型安全接口操作 `{}` 实例", ident), "code"),
+                        bullet("通过作用域与生命周期管理防止资源泄漏", "code"),
+                        bullet("现代语言特性保障零成本抽象与编译期优化", "code"),
+                    ],
+                    detail: format!("### 语法细节\n代码中对 `{}` 的使用体现了所有权与引用的严格约束，避免了隐式拷贝开销。", ident),
+                },
+                principle: ExplanationSection {
+                    title: "原理".to_string(),
+                    one_sentence: "底层架构并发模型与网络传输设计权衡。".to_string(),
+                    bullets: vec![
+                        bullet(&format!("底层映射框架底层调度线程池，`{}` 不产生跨线程阻塞", ident), "knowledge"),
+                        bullet("支持动态伸缩与高吞吐并发设计", "knowledge"),
+                        bullet("提供故障隔离与优雅降级策略", "knowledge"),
+                    ],
+                    detail: format!("### 底层机制\n在高负载运行环境下，通过 `{}` 实现了计算与 I/O 的解耦，保障关键路径低抖动。", ident),
+                },
+                ..Default::default()
+            };
+            let concrete_report = QualityGate::evaluate(&concrete, code, Some("standard"), &generic_phrases);
+            assert!(
+                !concrete_report.is_shallow,
+                "Case '{}' concrete output must pass quality gate: score={}, issues={:?}",
+                ident, concrete_report.score, concrete_report.issues
+            );
+        }
+    }
 }

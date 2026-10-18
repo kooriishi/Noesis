@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import {
   FileContentPayload,
@@ -24,6 +24,13 @@ import {
   SymbolNeighborhood,
   LspServerStatus,
   LspLocation,
+  ExplanationSummary,
+  PromptPreset,
+  EffectivePromptPreview,
+  ConfusionDetailResponse,
+  AskStreamEvent,
+  AskPreviewResponse,
+  FeedbackStats,
 } from '../types';
 
 const isTauriEnv = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -277,7 +284,8 @@ export const ApiService = {
     snippet: string,
     startLine: number,
     endLine: number,
-    forceRefresh: boolean = false
+    forceRefresh: boolean = false,
+    depthMode: 'standard' | 'deep' = 'standard'
   ): Promise<StructuredExplanationResponse> {
     const fallbackCards = await this.explainCode(filePath, snippet, startLine, endLine);
     if (isTauriEnv()) {
@@ -288,6 +296,7 @@ export const ApiService = {
         startLine,
         endLine,
         forceRefresh,
+        depthMode,
       });
 
       const exp = raw?.explanation;
@@ -418,6 +427,9 @@ export const ApiService = {
         from_cache: Boolean(raw?.cached),
         is_template: !hasAiCards,
         warning: !hasAiCards && raw?.raw_unverified_output ? 'AI 返回内容未能解析为结构化四层卡片，已回退模板占位' : undefined,
+        quality: raw?.quality,
+        explanation_id: raw?.explanation_id,
+        depth_mode: depthMode,
       };
     }
 
@@ -733,5 +745,334 @@ export const ApiService = {
       return await invoke<string>('get_expert_system_prompt');
     }
     return '';
+  },
+
+  // ----------------- F3: Explanation History -----------------
+  async listExplanations(
+    filePath?: string,
+    query?: string,
+    pinnedOnly?: boolean,
+    limit?: number,
+    offset?: number
+  ): Promise<ExplanationSummary[]> {
+    if (isTauriEnv()) {
+      return await invoke<ExplanationSummary[]>('list_explanations', {
+        filePath,
+        query,
+        pinnedOnly,
+        limit,
+        offset,
+      });
+    }
+    return [];
+  },
+
+  async getExplanation(id: string): Promise<StructuredExplanationResponse | null> {
+    if (isTauriEnv()) {
+      const raw: any = await invoke('get_explanation', { id });
+      if (!raw) return null;
+      // raw is a CachedExplanation
+      try {
+        const parsed = JSON.parse(raw.json);
+        const perspectives: Array<'overall' | 'logic' | 'syntax' | 'principle'> = [
+          'overall',
+          'logic',
+          'syntax',
+          'principle',
+        ];
+        const cards: ExplanationCard[] = [];
+        const citById = new Map<string, any>();
+        for (const c of parsed.citations || []) {
+          if (c && c.id) citById.set(c.id, c);
+        }
+
+        const labels: Record<string, string> = {
+          overall: '整体架构与数据流',
+          logic: '逻辑实现与分支',
+          syntax: '核心语法与类型',
+          principle: '底层原理与机制',
+        };
+
+        for (const p of perspectives) {
+          const sec = parsed[p] || {};
+          const cardCitations: any[] = [];
+          const key_bullets = (sec.bullets || []).map((b: any) => {
+            if (typeof b === 'string') return b;
+            if (b?.kind === 'knowledge' && b?.pack_ref) {
+              cardCitations.push({
+                kind: 'knowledge',
+                pack_ref: b.pack_ref,
+                verification_status: 'knowledge',
+                verified: true,
+                note: b.text,
+              });
+            }
+            if (Array.isArray(b?.cites)) {
+              for (const cid of b.cites) {
+                const target = citById.get(cid);
+                if (target) {
+                  cardCitations.push({
+                    kind: 'code',
+                    file: target.file,
+                    line_start: target.line_start,
+                    line_end: target.line_end,
+                    quote: target.quote,
+                    verification_status: target.status || 'verified',
+                    verified: target.status === 'verified' || target.status === 'corrected',
+                    note: target.reason || target.quote,
+                  });
+                }
+              }
+            }
+            return b?.text || String(b);
+          });
+
+          cards.push({
+            id: `card-${raw.id}-${p}`,
+            perspective: p,
+            title: sec.title || labels[p],
+            one_sentence: sec.one_sentence || '',
+            key_bullets,
+            detailed_body: sec.detail || '',
+            source: {
+              file_path: raw.file_path || raw.file_id,
+              line_start: 1,
+              line_end: 1,
+              code_snippet: raw.selected_preview || '',
+            },
+            source_matches: true,
+            is_template: false,
+            is_expanded: false,
+            citations: cardCitations,
+          });
+        }
+
+        return {
+          cards,
+          manifest: {
+            basis_hash: raw.basis_hash,
+            total_tokens: 0,
+            budget_tokens: 16000,
+            layers: [],
+            injected_knowledge_ids: [],
+          },
+          from_cache: true,
+          is_template: false,
+          explanation_id: raw.id,
+          depth_mode: raw.depth_mode || 'standard',
+        };
+      } catch (err) {
+        console.error('Failed to parse cached explanation JSON', err);
+        return null;
+      }
+    }
+    return null;
+  },
+
+  async renameExplanation(id: string, newTitle: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('rename_explanation', { id, newTitle });
+    }
+    return true;
+  },
+
+  async pinExplanation(id: string, pinned: boolean): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('pin_explanation', { id, pinned });
+    }
+    return true;
+  },
+
+  async deleteExplanation(id: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('delete_explanation', { id });
+    }
+    return true;
+  },
+
+  // ----------------- F4: Ask & Stream -----------------
+  async previewAsk(
+    question: string,
+    file?: string,
+    range?: [number, number],
+    selectedCode?: string
+  ): Promise<AskPreviewResponse> {
+    if (isTauriEnv()) {
+      return await invoke<AskPreviewResponse>('preview_ask', {
+        question,
+        file,
+        range,
+        selectedCode,
+      });
+    }
+    return {
+      messages: [{ role: 'user', content: question }],
+      token_estimate: 200,
+      manifest: {
+        basis_hash: 'mock',
+        total_tokens: 200,
+        budget_tokens: 16000,
+        layers: [],
+        injected_knowledge_ids: [],
+      },
+      outbound_preview: {
+        target_url: 'https://api.deepseek.com',
+        model: 'deepseek-chat',
+        messages_count: 1,
+        total_chars: question.length,
+        contains_sanitized_tokens: false,
+        sanitized_preview: question,
+        file_references: file ? [file] : [],
+      },
+    };
+  },
+
+  async askProjectQuestion(
+    question: string,
+    onEvent: (event: AskStreamEvent) => void,
+    conversationId?: string,
+    file?: string,
+    range?: [number, number],
+    selectedCode?: string,
+    useTools?: boolean
+  ): Promise<string> {
+    if (isTauriEnv()) {
+      const channel = new Channel<AskStreamEvent>();
+      channel.onmessage = (event) => onEvent(event);
+      return await invoke<string>('ask_project_question', {
+        conversationId,
+        question,
+        file,
+        range,
+        selectedCode,
+        useTools,
+        onEvent: channel,
+      });
+    }
+    // Web fallback simulation
+    setTimeout(() => {
+      onEvent({ type: 'token', token: '当前处于纯网页预览模式，已模拟回答：' });
+      onEvent({ type: 'token', token: `针对问题「${question}」，系统已成功捕获上下文并装配。` });
+      onEvent({ type: 'done', conversation_id: 'mock-conv' });
+    }, 200);
+    return 'mock-conv';
+  },
+
+  // ----------------- F5: Prompt Presets -----------------
+  async listPromptPresets(scope?: string): Promise<PromptPreset[]> {
+    if (isTauriEnv()) {
+      return await invoke<PromptPreset[]>('list_prompt_presets', { scope });
+    }
+    return [];
+  },
+
+  async savePromptPreset(preset: PromptPreset): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('save_prompt_preset', { preset });
+    }
+    return true;
+  },
+
+  async setActivePromptPreset(id: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('set_active_prompt_preset', { id });
+    }
+    return true;
+  },
+
+  async deletePromptPreset(id: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('delete_prompt_preset', { id });
+    }
+    return true;
+  },
+
+  async resetPromptToDefault(scope: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('reset_prompt_to_default', { scope });
+    }
+    return true;
+  },
+
+  async previewEffectivePrompt(scope: string): Promise<EffectivePromptPreview> {
+    if (isTauriEnv()) {
+      return await invoke<EffectivePromptPreview>('preview_effective_prompt', { scope });
+    }
+    return {
+      scope,
+      preset_name: '内置默认',
+      l1_persona: '',
+      l0_locked: '',
+      full_prompt: '',
+      token_estimate: 0,
+    };
+  },
+
+  // ----------------- F6: Confusion Detail & Revisions -----------------
+  async getConfusionDetail(id: string): Promise<ConfusionDetailResponse | null> {
+    if (isTauriEnv()) {
+      const raw: any = await invoke('get_confusion_detail', { id });
+      if (!raw) return null;
+      return {
+        mark: raw[0],
+        revisions: raw[1] || [],
+      };
+    }
+    return null;
+  },
+
+  async reopenConfusionMark(id: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('reopen_confusion_mark', { id });
+    }
+    return true;
+  },
+
+  async deleteConfusionMark(id: string): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('delete_confusion_mark', { id });
+    }
+    return true;
+  },
+
+  async exportConfusionMarkdown(): Promise<string> {
+    if (isTauriEnv()) {
+      return await invoke<string>('export_confusion_markdown');
+    }
+    return '# Noesis 学习档案';
+  },
+
+  // ----------------- F7-a: Explanation Feedback -----------------
+  async submitExplanationFeedback(
+    explanationId: string,
+    cardPerspective: string,
+    feedback: string,
+    note?: string
+  ): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke('submit_explanation_feedback', {
+        explanationId,
+        cardPerspective,
+        feedback,
+        note,
+      });
+    }
+  },
+
+  async getFeedbackStats(promptVersion?: string, model?: string): Promise<FeedbackStats> {
+    if (isTauriEnv()) {
+      return await invoke<FeedbackStats>('get_feedback_stats', {
+        promptVersion,
+        model,
+      });
+    }
+    return {
+      total: 0,
+      helpful: 0,
+      too_generic: 0,
+      wrong: 0,
+      too_generic_rate: 0,
+      wrong_rate: 0,
+    };
   },
 };

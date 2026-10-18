@@ -58,3 +58,58 @@ html, body, #root {
     transform: rotate(360deg);
   }
 }
+
+@keyframes indeterminateProgress {
+  0% {
+    left: -40%;
+    width: 40%;
+  }
+  50% {
+    left: 20%;
+    width: 60%;
+  }
+  100% {
+    left: 100%;
+    width: 30%;
+  }
+}
+
+@keyframes skeletonPulse {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes linePulseFade {
+  0% {
+    background-color: rgba(137, 180, 250, 0.45);
+  }
+  30% {
+    background-color: rgba(137, 180, 250, 0.35);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.cm-jump-highlight {
+  animation: linePulseFade 1.6s cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .spin {
+    animation: none !important;
+  }
+  .cm-jump-highlight {
+    animation: none !important;
+    background-color: rgba(137, 180, 250, 0.2) !important;
+  }
+}

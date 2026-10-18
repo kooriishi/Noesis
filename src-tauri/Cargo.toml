@@ -1,6 +1,6 @@
 [package]
 name = "noesis"
-version = "0.1.0"
+version = "0.1.1"
 description = "NOESIS - Code-Learning Desktop IDE"
 authors = ["Noesis Team"]
 edition = "2021"

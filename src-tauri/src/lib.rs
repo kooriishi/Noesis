@@ -1,7 +1,7 @@
 use noesis_indexer::{CodeIndexer, DomainAdapter, ProjectMap};
 use noesis_learn::context::{
     ContextAssembler, ContextManifest, ContextRequest, DroppedItem, HeuristicTokenEstimator,
-    PROMPT_VERSION,
+    TokenEstimator, PROMPT_VERSION,
 };
 use noesis_learn::exercises::{
     compute_sm2_review, generate_cloze_exercise, generate_fact_exercises,
@@ -9,12 +9,15 @@ use noesis_learn::exercises::{
     Sm2ReviewState,
 };
 use noesis_learn::knowledge::KnowledgeBase;
+use noesis_learn::quality::{QualityGate, QualityReport};
 use noesis_learn::verifier::{
-    extract_and_parse_explanation_json, CitationVerifier, StructuredExplanation,
+    extract_and_parse_explanation_json, CitationItem, CitationVerifier, StructuredExplanation,
     VerificationSummary,
 };
 use noesis_learn::{ExplanationCard, LearnEngine, RewordingResult};
-use noesis_llm::stream::CancellationRegistry;
+use noesis_llm::stream::{
+    budget_conversation_history, split_chat_citations, CancellationRegistry,
+};
 use noesis_llm::{
     ChatMessage, ConnectionTestResult, CredentialStore, LlmConfig, LlmGateway, OutboundPreview,
 };
@@ -24,8 +27,9 @@ use noesis_project::{FileContentPayload, FileNode, ProjectManager};
 use noesis_ros2::Ros2Adapter;
 use noesis_runner::{CodeRunner, RunRequest, RunResponse};
 use noesis_store::{
-    CachedExplanation, ConceptProfileItem, ConfusionMark, ConversationRecord, DbStore,
-    ExerciseRecord, GraphSymbol, ReadingProgressRecord, StoredMessageRecord, SymbolNeighborhood,
+    CachedExplanation, ConceptProfileItem, ConfusionMark, ConfusionRevision, ConversationRecord,
+    DbStore, ExerciseRecord, ExplanationFeedback, ExplanationSummary, FeedbackStats, GraphSymbol,
+    PromptPreset, ReadingProgressRecord, StoredMessageRecord, SymbolNeighborhood,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -33,6 +37,9 @@ use std::sync::Mutex;
 use tauri::{Manager, State};
 
 const EXPERT_SYSTEM_PROMPT: &str = include_str!("../../prompts/code_guide_expert.system.md");
+const LOCKED_RULES_PROMPT: &str = include_str!("../../prompts/rules.locked.md");
+const DEFAULT_PERSONA_PROMPT: &str = include_str!("../../prompts/persona.default.md");
+const ANNOTATE_LINES_PROMPT: &str = include_str!("../../prompts/annotate_lines.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatus {
@@ -48,6 +55,72 @@ pub struct StructuredExplainResponse {
     pub dropped: Vec<DroppedItem>,
     pub cached: bool,
     pub raw_unverified_output: Option<String>,
+    #[serde(default)]
+    pub quality: Option<QualityReport>,
+    #[serde(default)]
+    pub explanation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AskStreamEvent {
+    #[serde(rename = "type")]
+    pub event_type: String, // "context_ready" | "token" | "tool_call" | "tool_result" | "citation_check" | "done" | "error"
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_args: Option<String>,
+    #[serde(default)]
+    pub tool_result: Option<String>,
+    #[serde(default)]
+    pub citations: Option<Vec<CitationItem>>,
+    #[serde(default)]
+    pub manifest: Option<ContextManifest>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskPreviewResponse {
+    pub messages: Vec<ChatMessage>,
+    pub token_estimate: usize,
+    pub manifest: ContextManifest,
+    pub outbound_preview: OutboundPreview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePromptPreview {
+    pub scope: String,
+    pub preset_name: String,
+    pub l1_persona: String,
+    pub l0_locked: String,
+    pub full_prompt: String,
+    pub estimated_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotatedLine {
+    pub line_no: u32,
+    pub code: String,
+    pub comment: String,
+    pub kind: String, // "trivial" | "key" | "hard"
+    #[serde(default)]
+    pub status: Option<String>, // "verified" | "corrected" | "missing"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AnnotatedSnippet {
+    pub lines: Vec<AnnotatedLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfusionDetailResponse {
+    pub mark: ConfusionMark,
+    pub revisions: Vec<ConfusionRevision>,
+    pub active_annotated: Option<AnnotatedSnippet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +399,7 @@ async fn explain_selection_structured(
     start_line: u32,
     end_line: u32,
     force_refresh: bool,
+    depth_mode: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<StructuredExplainResponse, String> {
     let (root_path, project_id) = {
@@ -337,23 +411,34 @@ async fn explain_selection_structured(
         }
     };
 
-    let effective = state.credentials.resolve_effective_config(&config);
+    let mut effective = state.credentials.resolve_effective_config(&config);
+    if depth_mode.as_deref() == Some("deep") {
+        effective.max_tokens = effective.max_tokens.max(8192);
+    }
+
+    let active_preset = state.store.get_active_prompt_preset("explain").ok().flatten();
+    let custom_persona = active_preset.map(|p| p.persona_text);
+
     let estimator = HeuristicTokenEstimator;
+    let budget_tokens = if depth_mode.as_deref() == Some("deep") { 24000 } else { 16000 };
+
     let ctx_req = ContextRequest {
         kind: "explain_selection".to_string(),
         project_id: project_id.clone(),
         file: Some(file_path.clone()),
         range: Some((start_line, end_line)),
-        selected_code: Some(snippet),
+        selected_code: Some(snippet.clone()),
         question: None,
         entity_ref: None,
         conversation_id: None,
-        budget_tokens: 16000,
+        budget_tokens,
         include_learning_profile: true,
         re_explain_type: None,
         re_explain_level: None,
         previous_explanation_summary: None,
         user_note: None,
+        depth_mode: depth_mode.clone(),
+        custom_persona,
     };
 
     let pack = ContextAssembler::assemble(
@@ -364,6 +449,8 @@ async fn explain_selection_structured(
         &estimator,
         &effective.model,
     );
+
+    let generic_phrases = QualityGate::load_generic_phrases(&root_path);
 
     if !force_refresh {
         if let Ok(Some(cached)) = state.store.get_cached_explanation(
@@ -377,6 +464,12 @@ async fn explain_selection_structured(
                     &pack.manifest.loaded_knowledge_packs,
                     &mut exp,
                 );
+                let quality = QualityGate::evaluate(
+                    &exp,
+                    &snippet,
+                    depth_mode.as_deref(),
+                    &generic_phrases,
+                );
                 return Ok(StructuredExplainResponse {
                     explanation: Some(exp),
                     verification,
@@ -384,6 +477,8 @@ async fn explain_selection_structured(
                     dropped: pack.dropped,
                     cached: true,
                     raw_unverified_output: None,
+                    quality: Some(quality),
+                    explanation_id: Some(cached.id),
                 });
             }
         }
@@ -397,7 +492,7 @@ async fn explain_selection_structured(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: EXPERT_SYSTEM_PROMPT.to_string(),
+            content: pack.items.iter().find(|i| i.kind == "system_prompt").map(|i| i.text.clone()).unwrap_or_else(|| EXPERT_SYSTEM_PROMPT.to_string()),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -415,7 +510,7 @@ async fn explain_selection_structured(
         Ok(exp) => Ok(exp),
         Err(first_err) => {
             // C1 retry once with parse error
-            let mut retry_msgs = messages;
+            let mut retry_msgs = messages.clone();
             retry_msgs.push(ChatMessage {
                 role: "assistant".to_string(),
                 content: raw_reply.clone(),
@@ -436,15 +531,69 @@ async fn explain_selection_structured(
 
     match parsed {
         Ok(mut exp) => {
-            let verification = CitationVerifier::verify(
+            let mut verification = CitationVerifier::verify(
                 &root_path,
                 &pack.manifest.loaded_knowledge_packs,
                 &mut exp,
             );
+            let mut quality = QualityGate::evaluate(
+                &exp,
+                &snippet,
+                depth_mode.as_deref(),
+                &generic_phrases,
+            );
+
+            // F2 Quality Gate: If content is too shallow or generic, retry once with issues prompt
+            if quality.is_shallow {
+                let mut quality_retry_msgs = messages.clone();
+                quality_retry_msgs.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: serde_json::to_string(&exp).unwrap_or_default(),
+                });
+                quality_retry_msgs.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "你上一次给出的解读深度不足、过于泛化（具体问题：{}）。请结合代码中的具体标识符，补充逐行追踪逻辑和底层机制详述，必须输出完整合法的 JSON 对象。",
+                        quality.issues.join("; ")
+                    ),
+                });
+                if let Ok(retry_reply) = state.llm.send_chat(&effective, quality_retry_msgs).await {
+                    if let Ok(mut retry_exp) = extract_and_parse_explanation_json(&retry_reply) {
+                        verification = CitationVerifier::verify(
+                            &root_path,
+                            &pack.manifest.loaded_knowledge_packs,
+                            &mut retry_exp,
+                        );
+                        quality = QualityGate::evaluate(
+                            &retry_exp,
+                            &snippet,
+                            depth_mode.as_deref(),
+                            &generic_phrases,
+                        );
+                        exp = retry_exp;
+                    }
+                }
+            }
+
+            let exp_id = format!(
+                "exp-{}-{}",
+                chrono::Utc::now().timestamp_millis(),
+                &pack.basis_hash[..8.min(pack.basis_hash.len())]
+            );
+
+            let title_text = exp.overall.one_sentence.chars().take(40).collect::<String>();
+            let title = if title_text.trim().is_empty() {
+                let fn_name = file_path.split('/').next_back().unwrap_or(&file_path);
+                format!("{}:{}-{}", fn_name, start_line, end_line)
+            } else {
+                title_text
+            };
+            let preview = snippet.chars().take(200).collect::<String>();
+
             if let Ok(json_str) = serde_json::to_string(&exp) {
                 let stats_str = serde_json::to_string(&verification).unwrap_or_default();
                 let _ = state.store.save_explanation_cache(&CachedExplanation {
-                    id: format!("exp-{}", pack.basis_hash),
+                    id: exp_id.clone(),
                     project_id: project_id.clone(),
                     file_id: file_path.clone(),
                     range: format!("{}-{}", start_line, end_line),
@@ -455,8 +604,16 @@ async fn explain_selection_structured(
                     json: json_str,
                     stats: stats_str,
                     created_at: chrono::Utc::now().timestamp(),
+                    title: Some(title),
+                    file_path: Some(file_path.clone()),
+                    selected_preview: Some(preview),
+                    pinned: false,
+                    deleted: false,
+                    depth_mode: depth_mode.clone(),
+                    last_opened_at: Some(chrono::Utc::now().timestamp()),
                 });
             }
+
             Ok(StructuredExplainResponse {
                 explanation: Some(exp),
                 verification,
@@ -464,6 +621,8 @@ async fn explain_selection_structured(
                 dropped: pack.dropped,
                 cached: false,
                 raw_unverified_output: None,
+                quality: Some(quality),
+                explanation_id: Some(exp_id),
             })
         }
         Err(_) => Ok(StructuredExplainResponse {
@@ -473,6 +632,8 @@ async fn explain_selection_structured(
             dropped: pack.dropped,
             cached: false,
             raw_unverified_output: Some(raw_reply),
+            quality: None,
+            explanation_id: None,
         }),
     }
 }
@@ -517,6 +678,8 @@ fn mark_confusion(
         resolved_level: None,
         user_note,
         created_at: chrono::Utc::now().to_rfc3339(),
+        review_exercise_id: None,
+        concepts_json: None,
     };
 
     let _ = state.store.save_mark(&mark);
@@ -851,6 +1014,806 @@ fn lsp_get_hover(
         .get_hover_from_store(Some(&state.store), &project_id, &file_path, line, &word))
 }
 
+// ----------------- F3: Explanation History Commands -----------------
+
+#[tauri::command]
+fn list_explanations(
+    file_path: Option<String>,
+    query: Option<String>,
+    pinned_only: Option<bool>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExplanationSummary>, String> {
+    let project_id = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        if let Some(pm) = pm_guard.as_ref() {
+            pm.normalized_root()
+        } else {
+            "default".to_string()
+        }
+    };
+    state
+        .store
+        .list_explanations(
+            &project_id,
+            file_path.as_deref(),
+            query.as_deref(),
+            pinned_only.unwrap_or(false),
+            limit.unwrap_or(20),
+            offset.unwrap_or(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_explanation(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<StructuredExplainResponse>, String> {
+    let root_path = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        if let Some(pm) = pm_guard.as_ref() {
+            pm.root_path().to_path_buf()
+        } else {
+            PathBuf::from(".")
+        }
+    };
+
+    let item = state.store.get_explanation(&id).map_err(|e| e.to_string())?;
+    let Some(cached) = item else {
+        return Ok(None);
+    };
+
+    let mut exp: StructuredExplanation =
+        serde_json::from_str(&cached.json).map_err(|e| e.to_string())?;
+    let verification = CitationVerifier::verify(&root_path, &[], &mut exp);
+    let generic_phrases = QualityGate::load_generic_phrases(&root_path);
+    let quality = QualityGate::evaluate(
+        &exp,
+        &cached.selected_preview.clone().unwrap_or_default(),
+        cached.depth_mode.as_deref(),
+        &generic_phrases,
+    );
+
+    Ok(Some(StructuredExplainResponse {
+        explanation: Some(exp),
+        verification,
+        manifest: ContextManifest::default(),
+        dropped: vec![],
+        cached: true,
+        raw_unverified_output: None,
+        quality: Some(quality),
+        explanation_id: Some(cached.id),
+    }))
+}
+
+#[tauri::command]
+fn rename_explanation(
+    id: String,
+    new_title: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .store
+        .rename_explanation(&id, &new_title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pin_explanation(id: String, pinned: bool, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .pin_explanation(&id, pinned)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_explanation(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .delete_explanation(&id)
+        .map_err(|e| e.to_string())
+}
+
+// ----------------- F4: Project Ask & Outbound Preview -----------------
+
+#[tauri::command]
+fn preview_ask(
+    question: String,
+    file: Option<String>,
+    range: Option<(u32, u32)>,
+    selected_code: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AskPreviewResponse, String> {
+    let (root_path, project_id) = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        if let Some(pm) = pm_guard.as_ref() {
+            (pm.root_path().to_path_buf(), pm.normalized_root())
+        } else {
+            (PathBuf::from("."), "default".to_string())
+        }
+    };
+
+    let effective = state
+        .credentials
+        .resolve_effective_config(&state.credentials.get_config_view());
+    let estimator = HeuristicTokenEstimator;
+
+    let active_preset = state.store.get_active_prompt_preset("ask").ok().flatten();
+    let custom_persona = active_preset.map(|p| p.persona_text);
+
+    let ctx_req = ContextRequest {
+        kind: "ask".to_string(),
+        project_id,
+        file,
+        range,
+        selected_code,
+        question: Some(question.clone()),
+        entity_ref: None,
+        conversation_id: None,
+        budget_tokens: 16000,
+        include_learning_profile: true,
+        re_explain_type: None,
+        re_explain_level: None,
+        previous_explanation_summary: None,
+        user_note: None,
+        depth_mode: None,
+        custom_persona,
+    };
+
+    let pack = ContextAssembler::assemble(
+        &root_path,
+        Some(&state.store),
+        Some(&state.knowledge_base),
+        &ctx_req,
+        &estimator,
+        &effective.model,
+    );
+
+    let sys_prompt = pack
+        .items
+        .iter()
+        .find(|i| i.kind == "system_prompt")
+        .map(|i| i.text.clone())
+        .unwrap_or_else(|| EXPERT_SYSTEM_PROMPT.to_string());
+    let mut context_chunks = Vec::new();
+    for item in &pack.items {
+        if item.kind != "system_prompt" {
+            context_chunks.push(item.text.clone());
+        }
+    }
+    let user_prompt = format!(
+        "项目上下文：\n\n{}\n\n用户问题：{}",
+        context_chunks.join("\n\n"),
+        question
+    );
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys_prompt,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt,
+        },
+    ];
+
+    let outbound_preview = state
+        .llm
+        .filter()
+        .inspect_outbound(&effective, &messages)
+        .map_err(|e| e.to_string())?;
+
+    Ok(AskPreviewResponse {
+        messages,
+        token_estimate: pack.token_estimate,
+        manifest: pack.manifest,
+        outbound_preview,
+    })
+}
+
+#[tauri::command]
+async fn ask_project_question(
+    conversation_id: Option<String>,
+    question: String,
+    file: Option<String>,
+    range: Option<(u32, u32)>,
+    selected_code: Option<String>,
+    _use_tools: Option<bool>,
+    on_event: tauri::ipc::Channel<AskStreamEvent>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let (root_path, project_id) = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        if let Some(pm) = pm_guard.as_ref() {
+            (pm.root_path().to_path_buf(), pm.normalized_root())
+        } else {
+            (PathBuf::from("."), "default".to_string())
+        }
+    };
+
+    let effective = state
+        .credentials
+        .resolve_effective_config(&state.credentials.get_config_view());
+    let estimator = HeuristicTokenEstimator;
+
+    let active_preset = state.store.get_active_prompt_preset("ask").ok().flatten();
+    let custom_persona = active_preset.map(|p| p.persona_text);
+
+    let ctx_req = ContextRequest {
+        kind: "ask".to_string(),
+        project_id: project_id.clone(),
+        file: file.clone(),
+        range,
+        selected_code: selected_code.clone(),
+        question: Some(question.clone()),
+        entity_ref: None,
+        conversation_id: conversation_id.clone(),
+        budget_tokens: 16000,
+        include_learning_profile: true,
+        re_explain_type: None,
+        re_explain_level: None,
+        previous_explanation_summary: None,
+        user_note: None,
+        depth_mode: None,
+        custom_persona,
+    };
+
+    let pack = ContextAssembler::assemble(
+        &root_path,
+        Some(&state.store),
+        Some(&state.knowledge_base),
+        &ctx_req,
+        &estimator,
+        &effective.model,
+    );
+
+    let conv_id = match conversation_id {
+        Some(cid) if !cid.is_empty() => cid,
+        _ => {
+            let fn_prefix = file
+                .as_deref()
+                .and_then(|f| f.split('/').next_back())
+                .unwrap_or("问答");
+            let q_sub: String = question.chars().take(20).collect();
+            let title = format!("{}: {}", fn_prefix, q_sub);
+            let new_id = format!("conv-{}", chrono::Utc::now().timestamp_millis());
+            state
+                .store
+                .create_conversation(&new_id, &project_id, &title)
+                .map_err(|e| e.to_string())?
+                .id
+        }
+    };
+
+    let user_msg_id = format!("msg-{}", chrono::Utc::now().timestamp_millis());
+    let user_msg = StoredMessageRecord {
+        id: user_msg_id,
+        conversation_id: conv_id.clone(),
+        role: "user".to_string(),
+        content: question.clone(),
+        meta_json: "{}".to_string(),
+        tokens: estimator.estimate(&question),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    let _ = state.store.append_message(&user_msg);
+
+    let _ = on_event.send(AskStreamEvent {
+        event_type: "context_ready".to_string(),
+        manifest: Some(pack.manifest.clone()),
+        conversation_id: Some(conv_id.clone()),
+        ..Default::default()
+    });
+
+    let sys_prompt = pack
+        .items
+        .iter()
+        .find(|i| i.kind == "system_prompt")
+        .map(|i| i.text.clone())
+        .unwrap_or_else(|| EXPERT_SYSTEM_PROMPT.to_string());
+    let mut context_chunks = Vec::new();
+    for item in &pack.items {
+        if item.kind != "system_prompt" {
+            context_chunks.push(item.text.clone());
+        }
+    }
+
+    let history_records = state.store.list_messages(&conv_id, 100).unwrap_or_default();
+    let history_plan = budget_conversation_history(&history_records, "", None, 16000, &estimator);
+
+    let mut send_messages = vec![ChatMessage {
+        role: "system".to_string(),
+        content: format!(
+            "{}\n\n以下为当前项目的真实代码上下文与领域事实（严格根据此依据回答，严禁编造代码）：\n\n{}",
+            sys_prompt,
+            context_chunks.join("\n\n")
+        ),
+    }];
+
+    for m in history_plan.retained_messages {
+        send_messages.push(m);
+    }
+    send_messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: question.clone(),
+    });
+
+    let on_event_clone = on_event.clone();
+    let cid = conv_id.clone();
+    let final_answer = state
+        .llm
+        .send_chat_stream(&effective, send_messages, move |delta| {
+            let _ = on_event_clone.send(AskStreamEvent {
+                event_type: "token".to_string(),
+                token: Some(delta.to_string()),
+                conversation_id: Some(cid.clone()),
+                ..Default::default()
+            });
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (clean_body, tail_opt) = split_chat_citations(&final_answer);
+    let mut citations = tail_opt.map(|t| t.citations).unwrap_or_default();
+    if !citations.is_empty() {
+        let mut dummy_exp = StructuredExplanation {
+            citations: citations.clone(),
+            ..Default::default()
+        };
+        let _ = CitationVerifier::verify(
+            &root_path,
+            &pack.manifest.loaded_knowledge_packs,
+            &mut dummy_exp,
+        );
+        citations = dummy_exp.citations;
+    }
+
+    let _ = on_event.send(AskStreamEvent {
+        event_type: "citation_check".to_string(),
+        citations: Some(citations.clone()),
+        conversation_id: Some(conv_id.clone()),
+        ..Default::default()
+    });
+
+    let _ = on_event.send(AskStreamEvent {
+        event_type: "done".to_string(),
+        conversation_id: Some(conv_id.clone()),
+        ..Default::default()
+    });
+
+    let asst_msg_id = format!("msg-{}", chrono::Utc::now().timestamp_millis());
+    let asst_msg = StoredMessageRecord {
+        id: asst_msg_id,
+        conversation_id: conv_id.clone(),
+        role: "assistant".to_string(),
+        content: clean_body,
+        meta_json: serde_json::json!({
+            "citations": citations
+        }).to_string(),
+        tokens: estimator.estimate(&final_answer),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    let _ = state.store.append_message(&asst_msg);
+
+    Ok(conv_id)
+}
+
+// ----------------- F5: Prompt Presets Commands -----------------
+
+#[tauri::command]
+fn list_prompt_presets(
+    scope: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<PromptPreset>, String> {
+    state
+        .store
+        .list_prompt_presets(scope.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_prompt_preset(preset: PromptPreset, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .save_prompt_preset(&preset)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_active_prompt_preset(
+    id: String,
+    scope: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .store
+        .set_active_prompt_preset(&id, &scope)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_prompt_preset(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .delete_prompt_preset(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_prompt_to_default(scope: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .reset_prompt_to_default(&scope)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn preview_effective_prompt(
+    scope: String,
+    state: State<'_, AppState>,
+) -> Result<EffectivePromptPreview, String> {
+    let (active_preset, preset_name) = match state.store.get_active_prompt_preset(&scope) {
+        Ok(Some(p)) => (p.persona_text, p.name),
+        _ => (
+            DEFAULT_PERSONA_PROMPT.to_string(),
+            "内置默认预设".to_string(),
+        ),
+    };
+    let root = {
+        let pm_guard = state.project_manager.lock().unwrap();
+        pm_guard
+            .as_ref()
+            .map(|pm| pm.root_path().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let full = noesis_learn::context::load_layered_system_prompt(&root, Some(&active_preset));
+    let est = HeuristicTokenEstimator;
+    let tokens = est.estimate(&full);
+
+    Ok(EffectivePromptPreview {
+        scope,
+        preset_name,
+        l1_persona: active_preset,
+        l0_locked: LOCKED_RULES_PROMPT.to_string(),
+        full_prompt: full,
+        estimated_tokens: tokens,
+    })
+}
+
+// ----------------- F6: Confusion Learning Archive -----------------
+
+#[tauri::command]
+async fn explain_confusion(
+    mark_id: String,
+    level: Option<u8>,
+    user_note: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ConfusionDetailResponse, String> {
+    let (root_path, project_id) = {
+        let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        if let Some(pm) = pm_guard.as_ref() {
+            (pm.root_path().to_path_buf(), pm.normalized_root())
+        } else {
+            (PathBuf::from("."), "default".to_string())
+        }
+    };
+
+    let detail = state
+        .store
+        .get_confusion_detail(&mark_id)
+        .map_err(|e| e.to_string())?;
+    let (mut mark, mut revisions) =
+        detail.ok_or_else(|| format!("Mark '{}' not found", mark_id))?;
+
+    if let Some(ref note) = user_note {
+        mark.user_note = Some(note.clone());
+    }
+
+    let current_level = level.unwrap_or(mark.level as u8);
+    mark.level = current_level as i32;
+
+    let active_preset = state
+        .store
+        .get_active_prompt_preset("reexplain")
+        .ok()
+        .flatten();
+    let custom_persona = active_preset.map(|p| p.persona_text);
+
+    let effective = state
+        .credentials
+        .resolve_effective_config(&state.credentials.get_config_view());
+    let estimator = HeuristicTokenEstimator;
+
+    let prev_summary = revisions.last().map(|r| r.explanation_json.clone());
+
+    let ctx_req = ContextRequest {
+        kind: "re_explain".to_string(),
+        project_id: project_id.clone(),
+        file: Some(mark.file_path.clone()),
+        range: Some((mark.line_start, mark.line_end)),
+        selected_code: Some(mark.code_snippet.clone()),
+        question: None,
+        entity_ref: None,
+        conversation_id: None,
+        budget_tokens: 16000,
+        include_learning_profile: true,
+        re_explain_type: Some(mark.category.clone()),
+        re_explain_level: Some(current_level),
+        previous_explanation_summary: prev_summary,
+        user_note: mark.user_note.clone(),
+        depth_mode: None,
+        custom_persona,
+    };
+
+    let pack = ContextAssembler::assemble(
+        &root_path,
+        Some(&state.store),
+        Some(&state.knowledge_base),
+        &ctx_req,
+        &estimator,
+        &effective.model,
+    );
+
+    let mut prompt_sections = Vec::new();
+    for item in &pack.items {
+        prompt_sections.push(item.text.clone());
+    }
+    let combined_prompt = prompt_sections.join("\n\n");
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "你是一位代码导读专家。请结合上下文给出通俗类比、最小示例、前置概念、启发式引导。必须输出合法的 JSON 对象，格式：{\"analogy\": \"...\", \"minimal_example\": \"...\", \"prerequisite_concept\": \"...\", \"guidance\": \"...\", \"concepts\": [\"...\"]}".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: combined_prompt,
+        },
+    ];
+
+    let reply = state
+        .llm
+        .send_chat(&effective, messages)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let exp_json_val: serde_json::Value = serde_json::from_str(&reply)
+        .or_else(|_| {
+            let s = reply.find('{').unwrap_or(0);
+            let e = reply.rfind('}').unwrap_or(reply.len());
+            serde_json::from_str(&reply[s..=e])
+        })
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "analogy": "生活类比：将该逻辑理解为工厂流水线的缓冲校验区",
+                "minimal_example": mark.code_snippet,
+                "prerequisite_concept": mark.category,
+                "guidance": "请关注变量在条件分支下的状态流变",
+                "concepts": [mark.category.clone()]
+            })
+        });
+
+    let annotate_messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: ANNOTATE_LINES_PROMPT.to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "请为以下行范围 {}-{} 的代码生成逐行精准注释（必须严格输出 JSON）：\n```\n{}\n```",
+                mark.line_start, mark.line_end, mark.code_snippet
+            ),
+        },
+    ];
+
+    let mut annotated_snippet = AnnotatedSnippet::default();
+    if let Ok(annot_reply) = state.llm.send_chat(&effective, annotate_messages).await {
+        if let Ok(parsed_annot) = serde_json::from_str::<AnnotatedSnippet>(&annot_reply) {
+            annotated_snippet = parsed_annot;
+        } else if let Some(s) = annot_reply.find('{') {
+            if let Some(e) = annot_reply.rfind('}') {
+                if let Ok(parsed_annot) =
+                    serde_json::from_str::<AnnotatedSnippet>(&annot_reply[s..=e])
+                {
+                    annotated_snippet = parsed_annot;
+                }
+            }
+        }
+    }
+
+    let real_lines: Vec<String> = mark.code_snippet.lines().map(|s| s.to_string()).collect();
+    let mut verified_lines = Vec::new();
+    for (idx, line_code) in real_lines.iter().enumerate() {
+        let line_num = mark.line_start + idx as u32;
+        if let Some(existing) = annotated_snippet.lines.iter().find(|l| l.line_no == line_num) {
+            let status = if existing.code.trim() == line_code.trim() {
+                "verified"
+            } else {
+                "corrected"
+            };
+            verified_lines.push(AnnotatedLine {
+                line_no: line_num,
+                code: line_code.clone(),
+                comment: existing.comment.clone(),
+                kind: existing.kind.clone(),
+                status: Some(status.to_string()),
+            });
+        } else {
+            verified_lines.push(AnnotatedLine {
+                line_no: line_num,
+                code: line_code.clone(),
+                comment: "（常规逻辑语句）".to_string(),
+                kind: "trivial".to_string(),
+                status: Some("missing".to_string()),
+            });
+        }
+    }
+    annotated_snippet.lines = verified_lines;
+
+    let concepts_vec: Vec<String> = exp_json_val
+        .get("concepts")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![mark.category.clone()]);
+    let concepts_json = serde_json::to_string(&concepts_vec).ok();
+    mark.concepts_json = concepts_json;
+
+    let rev_id = format!("rev-{}-{}", mark.id, chrono::Utc::now().timestamp_millis());
+    let revision = ConfusionRevision {
+        id: rev_id,
+        mark_id: mark.id.clone(),
+        level: current_level as i32,
+        created_at: chrono::Utc::now().timestamp(),
+        model: effective.model.clone(),
+        explanation_json: serde_json::to_string(&exp_json_val).unwrap_or_default(),
+        annotated_json: serde_json::to_string(&annotated_snippet).ok(),
+        similarity_score: 0.0,
+    };
+
+    let _ = state.store.save_confusion_revision(&revision);
+    let _ = state.store.save_mark(&mark);
+    revisions.push(revision);
+
+    Ok(ConfusionDetailResponse {
+        mark,
+        revisions,
+        active_annotated: Some(annotated_snippet),
+    })
+}
+
+#[tauri::command]
+fn get_confusion_detail(
+    mark_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ConfusionDetailResponse>, String> {
+    let detail = state
+        .store
+        .get_confusion_detail(&mark_id)
+        .map_err(|e| e.to_string())?;
+    let Some((mark, revisions)) = detail else {
+        return Ok(None);
+    };
+    let active_annotated = revisions
+        .last()
+        .and_then(|r| r.annotated_json.as_deref())
+        .and_then(|json_str| serde_json::from_str::<AnnotatedSnippet>(json_str).ok());
+
+    Ok(Some(ConfusionDetailResponse {
+        mark,
+        revisions,
+        active_annotated,
+    }))
+}
+
+#[tauri::command]
+fn reopen_confusion_mark(mark_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .reopen_confusion_mark(&mark_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_confusion_mark(mark_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .delete_confusion_mark(&mark_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_confusion_markdown(
+    mark_ids: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let marks = state.store.list_marks(None, None).map_err(|e| e.to_string())?;
+    let filtered: Vec<_> = if let Some(ref ids) = mark_ids {
+        marks.into_iter().filter(|m| ids.contains(&m.id)).collect()
+    } else {
+        marks
+    };
+
+    let mut md = String::from("# Noesis 学习档案：卡点与逐行精读汇编\n\n");
+    for m in &filtered {
+        md.push_str(&format!(
+            "## 【{}】{} ({}:{}-{})\n\n",
+            m.category,
+            m.user_note.as_deref().unwrap_or("代码卡点"),
+            m.file_path,
+            m.line_start,
+            m.line_end
+        ));
+        if let Ok(Some((_, revs))) = state.store.get_confusion_detail(&m.id) {
+            if let Some(last_rev) = revs.last() {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&last_rev.explanation_json) {
+                    if let Some(analogy) = val.get("analogy").and_then(|a| a.as_str()) {
+                        md.push_str(&format!("> **通俗类比**：{}\n\n", analogy));
+                    }
+                    if let Some(guide) = val.get("guidance").and_then(|g| g.as_str()) {
+                        md.push_str(&format!("- **引导思考**：{}\n", guide));
+                    }
+                }
+                if let Some(ref annot_str) = last_rev.annotated_json {
+                    if let Ok(annot) = serde_json::from_str::<AnnotatedSnippet>(annot_str) {
+                        md.push_str("\n### 逐行精读注释\n```text\n");
+                        for l in &annot.lines {
+                            md.push_str(&format!("{:4} | {:<50} // {}\n", l.line_no, l.code, l.comment));
+                        }
+                        md.push_str("```\n\n");
+                    }
+                }
+            }
+        }
+        md.push_str("---\n\n");
+    }
+    Ok(md)
+}
+
+// ----------------- F7-a: Explanation Feedback -----------------
+
+#[tauri::command]
+fn submit_explanation_feedback(
+    explanation_id: String,
+    card_perspective: String,
+    feedback: String,
+    note: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let fb = ExplanationFeedback {
+        id: format!("fb-{}", chrono::Utc::now().timestamp_millis()),
+        explanation_id,
+        card_perspective,
+        feedback,
+        note,
+        prompt_version: Some(PROMPT_VERSION.to_string()),
+        model: None,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    state
+        .store
+        .record_explanation_feedback(&fb)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_feedback_stats(
+    prompt_version: Option<String>,
+    model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<FeedbackStats, String> {
+    state
+        .store
+        .get_feedback_stats(prompt_version.as_deref(), model.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -938,7 +1901,27 @@ pub fn run() {
             lsp_find_definition,
             lsp_find_references,
             lsp_get_hover,
-            get_expert_system_prompt
+            get_expert_system_prompt,
+            list_explanations,
+            get_explanation,
+            rename_explanation,
+            pin_explanation,
+            delete_explanation,
+            preview_ask,
+            ask_project_question,
+            list_prompt_presets,
+            save_prompt_preset,
+            set_active_prompt_preset,
+            delete_prompt_preset,
+            reset_prompt_to_default,
+            preview_effective_prompt,
+            explain_confusion,
+            get_confusion_detail,
+            reopen_confusion_mark,
+            delete_confusion_mark,
+            export_confusion_markdown,
+            submit_explanation_feedback,
+            get_feedback_stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1004,6 +1987,8 @@ mod tests {
             re_explain_level: None,
             previous_explanation_summary: None,
             user_note: None,
+            depth_mode: None,
+            custom_persona: None,
         };
         let pack = ContextAssembler::assemble(
             &sample_path,

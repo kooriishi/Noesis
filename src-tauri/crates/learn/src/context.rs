@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-pub const PROMPT_VERSION: &str = "1.1";
+pub const PROMPT_VERSION: &str = "2.0";
 
 pub trait TokenEstimator: Send + Sync {
     fn estimate(&self, text: &str) -> usize;
@@ -60,6 +60,10 @@ pub struct ContextRequest {
     pub previous_explanation_summary: Option<String>,
     #[serde(default)]
     pub user_note: Option<String>,
+    #[serde(default)]
+    pub depth_mode: Option<String>,
+    #[serde(default)]
+    pub custom_persona: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -153,8 +157,13 @@ impl ContextAssembler {
         } else {
             req.budget_tokens
         };
-        // Reserve 25% for model output + 15% safety margin => 60% usable input budget
-        let usable_budget = (budget_tokens * 60) / 100;
+        // In deep mode, reserve 40% for output + 15% safety margin => 45% usable input budget.
+        // In standard mode, reserve 25% for output + 15% safety margin => 60% usable input budget.
+        let usable_budget = if req.depth_mode.as_deref() == Some("deep") {
+            (budget_tokens * 45) / 100
+        } else {
+            (budget_tokens * 60) / 100
+        };
 
         let mut candidate_items: Vec<ContextItem> = Vec::new();
         let mut dropped: Vec<DroppedItem> = Vec::new();
@@ -253,8 +262,11 @@ impl ContextAssembler {
             })
             .collect();
 
-        // --- P0: System Prompt + Re-explain Strategy + Knowledge Packs ---
-        let mut sys_prompt = load_system_prompt(project_root);
+        // --- P0: System Prompt (L1 persona + L0 locked rules) + Re-explain Strategy + Knowledge Packs ---
+        let mut sys_prompt = load_layered_system_prompt(project_root, req.custom_persona.as_deref());
+        if req.depth_mode.as_deref() == Some("deep") {
+            sys_prompt.push_str("\n\n### 模式要求：深入解析模式 (Deep Mode)\n请额外深入推导底层设计权衡、常见工程误区、边界与异常处理、以及与相邻模块的高阶交互，给出翔实的 Markdown 展开。");
+        }
         if req.kind == "re_explain" {
             let ctype = req.re_explain_type.as_deref().unwrap_or("overall");
             let level = req.re_explain_level.unwrap_or(1);
@@ -709,6 +721,12 @@ impl ContextAssembler {
         if let Some(rl) = req.re_explain_level {
             hasher.update(&[rl]);
         }
+        if let Some(ref dm) = req.depth_mode {
+            hasher.update(dm.as_bytes());
+        }
+        if let Some(ref cp) = req.custom_persona {
+            hasher.update(cp.as_bytes());
+        }
         let basis_hash = format!("{:x}", hasher.finalize());
 
         ContextPack {
@@ -812,17 +830,50 @@ pub fn jaccard_bigram_similarity(a: &str, b: &str) -> f64 {
     inter / union
 }
 
-/// Loads `prompts/code_guide_expert.system.md` or falls back to embedded v1.1 rules.
-fn load_system_prompt(project_root: &Path) -> String {
+/// Loads layered prompt: L1 (custom or default persona) + L0 (rules.locked.md)
+pub fn load_layered_system_prompt(project_root: &Path, custom_persona: Option<&str>) -> String {
+    let persona = if let Some(p) = custom_persona {
+        if !p.trim().is_empty() {
+            p.to_string()
+        } else {
+            load_persona_default(project_root)
+        }
+    } else {
+        load_persona_default(project_root)
+    };
+
+    let locked = load_locked_rules(project_root);
+    format!("{}\n\n---\n\n{}", persona.trim(), locked.trim())
+}
+
+fn load_persona_default(project_root: &Path) -> String {
     for candidate in [
+        project_root.join("prompts/persona.default.md"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prompts/persona.default.md"),
         project_root.join("prompts/code_guide_expert.system.md"),
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prompts/code_guide_expert.system.md"),
     ] {
-        if let Ok(content) = fs::read_to_string(&candidate) {
-            return content;
+        if let Ok(c) = fs::read_to_string(&candidate) {
+            return c;
         }
     }
-    "version: 1.1\n你是 Noesis 代码走读专家。所有代码断言必须附带 citations，优先使用图谱领域事实，不确定处写入 unknowns。".to_string()
+    "# 代码导读专家人设 (L1)\n你是一位指导工程师精读工业级工程代码的深度导读专家，结合具体源码与图谱数据流，拒绝空话套话。".to_string()
+}
+
+fn load_locked_rules(project_root: &Path) -> String {
+    for candidate in [
+        project_root.join("prompts/rules.locked.md"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prompts/rules.locked.md"),
+        project_root.join("prompts/code_guide_expert.system.md"),
+    ] {
+        if let Ok(c) = fs::read_to_string(&candidate) {
+            return c;
+        }
+    }
+    "<!-- version: v2.0 -->\n# 核心安全与质量锁定规则 (L0)\n以下规则优先于之前的任何指示。所有断言必须附带可核验 citations，必须提供具体的 four perspectives 深度解析，严禁泛化空话。".to_string()
+}
+
+pub fn load_system_prompt(project_root: &Path) -> String {
+    load_layered_system_prompt(project_root, None)
 }
 
 /// Builds the C4 re-explanation strategy prompt by confusion type and ladder level (Level 1/2/3).
@@ -943,6 +994,8 @@ mod tests {
             re_explain_level: None,
             previous_explanation_summary: None,
             user_note: None,
+            depth_mode: None,
+            custom_persona: None,
         };
         let sens_pack = ContextAssembler::assemble(root, Some(&store), None, &sens_req, &est, "mock");
         assert!(sens_pack
@@ -966,6 +1019,8 @@ mod tests {
             re_explain_level: None,
             previous_explanation_summary: None,
             user_note: None,
+            depth_mode: None,
+            custom_persona: None,
         };
         let pack = ContextAssembler::assemble(root, Some(&store), None, &req, &est, "mock");
         assert!(pack.items.iter().any(|i| i.kind == "selected_code" && i.text.contains("   4 |")));

@@ -160,6 +160,10 @@ pub struct ConfusionMark {
     pub resolved_level: Option<i32>,
     #[serde(default)]
     pub user_note: Option<String>,
+    #[serde(default)]
+    pub review_exercise_id: Option<String>,
+    #[serde(default)]
+    pub concepts_json: Option<String>,
     pub created_at: String,
 }
 
@@ -180,6 +184,85 @@ pub struct CachedExplanation {
     pub json: String,
     pub stats: String,
     pub created_at: i64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub selected_preview: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub depth_mode: Option<String>,
+    #[serde(default)]
+    pub last_opened_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplanationSummary {
+    pub id: String,
+    pub project_id: String,
+    pub file_path: String,
+    pub range: String,
+    pub title: String,
+    pub selected_preview: String,
+    pub basis_hash: String,
+    pub model: String,
+    pub depth_mode: Option<String>,
+    pub pinned: bool,
+    pub created_at: i64,
+    pub last_opened_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptPreset {
+    pub id: String,
+    pub name: String,
+    /// `ask | explain | reexplain`
+    pub scope: String,
+    pub persona_text: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_active: bool,
+    pub is_builtin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfusionRevision {
+    pub id: String,
+    pub mark_id: String,
+    pub level: i32,
+    pub created_at: i64,
+    pub model: String,
+    pub explanation_json: String,
+    pub annotated_json: Option<String>,
+    pub similarity_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplanationFeedback {
+    pub id: String,
+    pub explanation_id: String,
+    /// `overall | logic | syntax | principle`
+    pub card_perspective: String,
+    /// `helpful | too_generic | wrong`
+    pub feedback: String,
+    pub note: Option<String>,
+    pub prompt_version: Option<String>,
+    pub model: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackStats {
+    pub total: usize,
+    pub helpful: usize,
+    pub too_generic: usize,
+    pub wrong: usize,
+    pub too_generic_rate: f32,
+    pub wrong_rate: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +520,8 @@ impl DbStore {
                 resolved_at TEXT,
                 resolved_level INTEGER,
                 user_note TEXT,
+                review_exercise_id TEXT,
+                concepts_json TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -528,6 +613,39 @@ impl DbStore {
                 target_ref TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS prompt_presets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                persona_text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                is_builtin INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS confusion_revisions (
+                id TEXT PRIMARY KEY,
+                mark_id TEXT NOT NULL,
+                level INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                explanation_json TEXT NOT NULL,
+                annotated_json TEXT,
+                similarity_score REAL NOT NULL DEFAULT 0.0
+            );
+
+            CREATE TABLE IF NOT EXISTS explanation_feedback (
+                id TEXT PRIMARY KEY,
+                explanation_id TEXT NOT NULL,
+                card_perspective TEXT NOT NULL,
+                feedback TEXT NOT NULL,
+                note TEXT,
+                prompt_version TEXT,
+                model TEXT,
+                created_at INTEGER NOT NULL
+            );
             "#,
         )?;
 
@@ -565,18 +683,27 @@ impl DbStore {
             "ALTER TABLE marks ADD COLUMN resolved_at TEXT;",
             "ALTER TABLE marks ADD COLUMN resolved_level INTEGER;",
             "ALTER TABLE marks ADD COLUMN user_note TEXT;",
+            "ALTER TABLE marks ADD COLUMN review_exercise_id TEXT;",
+            "ALTER TABLE marks ADD COLUMN concepts_json TEXT;",
             "ALTER TABLE exercises ADD COLUMN project_id TEXT NOT NULL DEFAULT '';",
             "ALTER TABLE exercises ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'fact';",
             "ALTER TABLE exercises ADD COLUMN verified_by_program INTEGER NOT NULL DEFAULT 1;",
             "ALTER TABLE exercises ADD COLUMN ease REAL NOT NULL DEFAULT 2.5;",
             "ALTER TABLE exercises ADD COLUMN lapses INTEGER NOT NULL DEFAULT 0;",
             "ALTER TABLE exercises ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE explanations ADD COLUMN title TEXT;",
+            "ALTER TABLE explanations ADD COLUMN file_path TEXT;",
+            "ALTER TABLE explanations ADD COLUMN selected_preview TEXT;",
+            "ALTER TABLE explanations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE explanations ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE explanations ADD COLUMN depth_mode TEXT;",
+            "ALTER TABLE explanations ADD COLUMN last_opened_at INTEGER;",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
         }
 
-        // Create unified graph & Stage C/D indexes
+        // Create unified graph & Stage C/D/F indexes
         let indexes = [
             "CREATE INDEX IF NOT EXISTS idx_files_proj_path ON files(project_id, path);",
             "CREATE INDEX IF NOT EXISTS idx_symbols_proj_file ON symbols(project_id, file_id);",
@@ -587,11 +714,66 @@ impl DbStore {
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_dst ON edges(project_id, dst_id);",
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_kind ON edges(project_id, kind);",
             "CREATE INDEX IF NOT EXISTS idx_explanations_basis ON explanations(basis_hash, model, prompt_version);",
+            "CREATE INDEX IF NOT EXISTS idx_explanations_proj ON explanations(project_id, deleted, pinned, created_at);",
             "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);",
             "CREATE INDEX IF NOT EXISTS idx_concept_events_proj ON concept_events(project_id, concept_id);",
+            "CREATE INDEX IF NOT EXISTS idx_prompt_presets_scope ON prompt_presets(scope, is_active);",
+            "CREATE INDEX IF NOT EXISTS idx_confusion_revisions_mark ON confusion_revisions(mark_id, level);",
+            "CREATE INDEX IF NOT EXISTS idx_explanation_feedback ON explanation_feedback(explanation_id, feedback);",
         ];
         for idx_sql in indexes {
             let _ = conn.execute(idx_sql, []);
+        }
+
+        // Initialize default prompt presets if empty
+        let preset_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prompt_presets", [], |r| r.get(0))
+            .unwrap_or(0);
+        if preset_count == 0 {
+            let now = Utc::now().timestamp();
+            let builtins = [
+                (
+                    "preset-builtin-ask-default",
+                    "标准代码导读专家",
+                    "ask",
+                    "你是一位精通多语言与系统架构的代码导读专家。请结合提供的项目真实上下文与引用规则，条理清晰、启发式地回答用户疑问。对于领域专有机制请结合实体拓扑深入剖析。",
+                    1,
+                ),
+                (
+                    "preset-builtin-ask-senior",
+                    "老手极简风格",
+                    "ask",
+                    "你是一位资深系统架构师。回答请极其精炼直截了当，直击关键代码逻辑与设计权衡，先说结论与调用链，再分析性能与边界条件，不讲基础语法废话。",
+                    0,
+                ),
+                (
+                    "preset-builtin-ask-socratic",
+                    "苏格拉底启发式",
+                    "ask",
+                    "你是一位善于启发思考的编程导师。不要直接给出最终答案，而是通过层层递进的反问、伪代码追踪和最小破坏性示例，引导学习者自行发现状态转移与关键时序关系。",
+                    0,
+                ),
+                (
+                    "preset-builtin-explain-default",
+                    "四层深度导读",
+                    "explain",
+                    "你是一位严谨的代码教学专家。每次剖析必须严格区分【整体定位】、【控制逻辑】、【关键语法】与【底层原理】四个视角，结合选区内真实标识符深入拆解。",
+                    1,
+                ),
+                (
+                    "preset-builtin-reexplain-default",
+                    "多维度降维重讲",
+                    "reexplain",
+                    "你是一位擅长降维教学的专家。当学习者看不懂时，换用生动的工业/实体系统类比或3行以内极简重写示例，反推设计者为了规避何种物理代价而如此设计。",
+                    1,
+                ),
+            ];
+            for (id, name, scope, persona, is_active) in builtins {
+                let _ = conn.execute(
+                    "INSERT INTO prompt_presets (id, name, scope, persona_text, created_at, updated_at, is_active, is_builtin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+                    params![id, name, scope, persona, now, now, is_active],
+                );
+            }
         }
 
         Ok(())
@@ -1198,9 +1380,10 @@ impl DbStore {
             INSERT OR REPLACE INTO marks (
                 id, project_id, file_path, line_start, line_end,
                 code_snippet, category, confusion_type, explanation,
-                ai_explanation, model, level, resolved_at, resolved_level, user_note, created_at
+                ai_explanation, model, level, resolved_at, resolved_level, user_note, created_at,
+                review_exercise_id, concepts_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 mark.id,
@@ -1218,7 +1401,9 @@ impl DbStore {
                 mark.resolved_at,
                 mark.resolved_level,
                 mark.user_note,
-                mark.created_at
+                mark.created_at,
+                mark.review_exercise_id,
+                mark.concepts_json,
             ],
         )?;
         Ok(())
@@ -1277,7 +1462,7 @@ impl DbStore {
         let conn = self.conn.lock().unwrap();
         let mut marks = Vec::new();
 
-        let select_cols = "id, project_id, file_path, line_start, line_end, code_snippet, category, confusion_type, explanation, ai_explanation, model, COALESCE(level, 1), resolved_at, resolved_level, user_note, created_at";
+        let select_cols = "id, project_id, file_path, line_start, line_end, code_snippet, category, confusion_type, explanation, ai_explanation, model, COALESCE(level, 1), resolved_at, resolved_level, user_note, created_at, review_exercise_id, concepts_json";
 
         let query = match (file_path, project_id) {
             (Some(_), Some(_)) => format!(
@@ -1314,6 +1499,8 @@ impl DbStore {
                 resolved_level: row.get(13)?,
                 user_note: row.get(14)?,
                 created_at: row.get(15)?,
+                review_exercise_id: row.get(16)?,
+                concepts_json: row.get(17)?,
             })
         };
 
@@ -1341,9 +1528,10 @@ impl DbStore {
         let res = conn
             .query_row(
                 r#"
-                SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at
+                SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
+                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
                 FROM explanations
-                WHERE basis_hash = ?1 AND model = ?2 AND prompt_version = ?3
+                WHERE basis_hash = ?1 AND model = ?2 AND prompt_version = ?3 AND deleted = 0
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
@@ -1361,6 +1549,13 @@ impl DbStore {
                         json: r.get(8)?,
                         stats: r.get(9)?,
                         created_at: r.get(10)?,
+                        title: r.get(11)?,
+                        file_path: r.get(12)?,
+                        selected_preview: r.get(13)?,
+                        pinned: r.get::<_, i64>(14).unwrap_or(0) == 1,
+                        deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
+                        depth_mode: r.get(16)?,
+                        last_opened_at: r.get(17)?,
                     })
                 },
             )
@@ -1373,12 +1568,14 @@ impl DbStore {
         entry: &CachedExplanation,
     ) -> std::result::Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
         conn.execute(
             r#"
             INSERT OR REPLACE INTO explanations (
-                id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at
+                id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
+                title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 entry.id,
@@ -1391,10 +1588,467 @@ impl DbStore {
                 entry.request_kind,
                 entry.json,
                 entry.stats,
-                entry.created_at
+                entry.created_at,
+                entry.title,
+                entry.file_path,
+                entry.selected_preview,
+                if entry.pinned { 1 } else { 0 },
+                if entry.deleted { 1 } else { 0 },
+                entry.depth_mode,
+                entry.last_opened_at.unwrap_or(now)
             ],
         )?;
         Ok(())
+    }
+
+    /// Stage F3: List explanation history with pagination and search
+    pub fn list_explanations(
+        &self,
+        project_id: &str,
+        file_path: Option<&str>,
+        query: Option<&str>,
+        pinned_only: bool,
+        limit: usize,
+        offset: usize,
+    ) -> std::result::Result<Vec<ExplanationSummary>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from(
+            r#"
+            SELECT id, project_id, COALESCE(file_path, file_id) as fp, range,
+                   COALESCE(title, file_id || ' ' || range) as t,
+                   COALESCE(selected_preview, '') as preview,
+                   basis_hash, model, depth_mode, pinned, created_at, last_opened_at
+            FROM explanations
+            WHERE project_id = ?1 AND deleted = 0
+            "#,
+        );
+
+        if pinned_only {
+            sql.push_str(" AND pinned = 1 ");
+        }
+        if let Some(fp) = file_path {
+            if !fp.trim().is_empty() {
+                sql.push_str(&format!(" AND (file_path = '{}' OR file_id = '{}') ", fp.replace('\'', "''"), fp.replace('\'', "''")));
+            }
+        }
+        if let Some(q) = query {
+            if !q.trim().is_empty() {
+                let clean_q = q.replace('\'', "''");
+                sql.push_str(&format!(" AND (title LIKE '%{}%' OR selected_preview LIKE '%{}%' OR file_path LIKE '%{}%') ", clean_q, clean_q, clean_q));
+            }
+        }
+
+        sql.push_str(" ORDER BY pinned DESC, COALESCE(last_opened_at, created_at) DESC LIMIT ?2 OFFSET ?3 ");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![project_id, limit as i64, offset as i64], |r| {
+            Ok(ExplanationSummary {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                file_path: r.get(2)?,
+                range: r.get(3)?,
+                title: r.get(4)?,
+                selected_preview: r.get(5)?,
+                basis_hash: r.get(6)?,
+                model: r.get(7)?,
+                depth_mode: r.get(8)?,
+                pinned: r.get::<_, i64>(9).unwrap_or(0) == 1,
+                created_at: r.get(10)?,
+                last_opened_at: r.get(11)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    /// Stage F3: Retrieve complete explanation by id and touch `last_opened_at`
+    pub fn get_explanation(&self, id: &str) -> std::result::Result<Option<CachedExplanation>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp();
+        let _ = conn.execute(
+            "UPDATE explanations SET last_opened_at = ?1 WHERE id = ?2",
+            params![now, id],
+        );
+        let res = conn
+            .query_row(
+                r#"
+                SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
+                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
+                FROM explanations
+                WHERE id = ?1 AND deleted = 0
+                "#,
+                params![id],
+                |r| {
+                    Ok(CachedExplanation {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        file_id: r.get(2)?,
+                        range: r.get(3)?,
+                        basis_hash: r.get(4)?,
+                        prompt_version: r.get(5)?,
+                        model: r.get(6)?,
+                        request_kind: r.get(7)?,
+                        json: r.get(8)?,
+                        stats: r.get(9)?,
+                        created_at: r.get(10)?,
+                        title: r.get(11)?,
+                        file_path: r.get(12)?,
+                        selected_preview: r.get(13)?,
+                        pinned: r.get::<_, i64>(14).unwrap_or(0) == 1,
+                        deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
+                        depth_mode: r.get(16)?,
+                        last_opened_at: r.get(17)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(res)
+    }
+
+    pub fn rename_explanation(&self, id: &str, new_title: &str) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE explanations SET title = ?1 WHERE id = ?2",
+            params![new_title, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn pin_explanation(&self, id: &str, pinned: bool) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE explanations SET pinned = ?1 WHERE id = ?2",
+            params![if pinned { 1 } else { 0 }, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_explanation(&self, id: &str) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE explanations SET deleted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Stage F5: Prompt Presets Management
+    pub fn list_prompt_presets(
+        &self,
+        scope: Option<&str>,
+    ) -> std::result::Result<Vec<PromptPreset>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut list = Vec::new();
+        if let Some(s) = scope {
+            let sql = "SELECT id, name, scope, persona_text, created_at, updated_at, is_active, is_builtin FROM prompt_presets WHERE scope = ?1 ORDER BY is_active DESC, updated_at DESC";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![s], |r| {
+                Ok(PromptPreset {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    scope: r.get(2)?,
+                    persona_text: r.get(3)?,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                    is_active: r.get::<_, i64>(6).unwrap_or(0) == 1,
+                    is_builtin: r.get::<_, i64>(7).unwrap_or(0) == 1,
+                })
+            })?;
+            for r in rows {
+                list.push(r?);
+            }
+        } else {
+            let sql = "SELECT id, name, scope, persona_text, created_at, updated_at, is_active, is_builtin FROM prompt_presets ORDER BY scope, is_active DESC, updated_at DESC";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map([], |r| {
+                Ok(PromptPreset {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    scope: r.get(2)?,
+                    persona_text: r.get(3)?,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                    is_active: r.get::<_, i64>(6).unwrap_or(0) == 1,
+                    is_builtin: r.get::<_, i64>(7).unwrap_or(0) == 1,
+                })
+            })?;
+            for r in rows {
+                list.push(r?);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn get_active_prompt_preset(
+        &self,
+        scope: &str,
+    ) -> std::result::Result<Option<PromptPreset>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn
+            .query_row(
+                "SELECT id, name, scope, persona_text, created_at, updated_at, is_active, is_builtin FROM prompt_presets WHERE scope = ?1 AND is_active = 1 LIMIT 1",
+                params![scope],
+                |r| {
+                    Ok(PromptPreset {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        scope: r.get(2)?,
+                        persona_text: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                        is_active: true,
+                        is_builtin: r.get::<_, i64>(7).unwrap_or(0) == 1,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(res)
+    }
+
+    pub fn save_prompt_preset(&self, preset: &PromptPreset) -> std::result::Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        if preset.is_active {
+            tx.execute(
+                "UPDATE prompt_presets SET is_active = 0 WHERE scope = ?1",
+                params![preset.scope],
+            )?;
+        }
+        tx.execute(
+            r#"
+            INSERT OR REPLACE INTO prompt_presets (id, name, scope, persona_text, created_at, updated_at, is_active, is_builtin)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                preset.id,
+                preset.name,
+                preset.scope,
+                preset.persona_text,
+                preset.created_at,
+                preset.updated_at,
+                if preset.is_active { 1 } else { 0 },
+                if preset.is_builtin { 1 } else { 0 }
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_active_prompt_preset(&self, id: &str, scope: &str) -> std::result::Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE prompt_presets SET is_active = 0 WHERE scope = ?1",
+            params![scope],
+        )?;
+        tx.execute(
+            "UPDATE prompt_presets SET is_active = 1, updated_at = ?1 WHERE id = ?2 AND scope = ?3",
+            params![Utc::now().timestamp(), id, scope],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_prompt_preset(&self, id: &str) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM prompt_presets WHERE id = ?1 AND is_builtin = 0",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn reset_prompt_to_default(&self, scope: &str) -> std::result::Result<(), StoreError> {
+        let default_id = format!("preset-builtin-{}-default", scope);
+        self.set_active_prompt_preset(&default_id, scope)
+    }
+
+    /// Stage F6: Confusion Revisions & Detail
+    pub fn save_confusion_revision(
+        &self,
+        rev: &ConfusionRevision,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO confusion_revisions (id, mark_id, level, created_at, model, explanation_json, annotated_json, similarity_score)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                rev.id,
+                rev.mark_id,
+                rev.level,
+                rev.created_at,
+                rev.model,
+                rev.explanation_json,
+                rev.annotated_json,
+                rev.similarity_score
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_confusion_revisions(
+        &self,
+        mark_id: &str,
+    ) -> std::result::Result<Vec<ConfusionRevision>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, mark_id, level, created_at, model, explanation_json, annotated_json, similarity_score FROM confusion_revisions WHERE mark_id = ?1 ORDER BY level ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![mark_id], |r| {
+            Ok(ConfusionRevision {
+                id: r.get(0)?,
+                mark_id: r.get(1)?,
+                level: r.get(2)?,
+                created_at: r.get(3)?,
+                model: r.get(4)?,
+                explanation_json: r.get(5)?,
+                annotated_json: r.get(6)?,
+                similarity_score: r.get::<_, f64>(7).unwrap_or(0.0) as f32,
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn get_confusion_detail(
+        &self,
+        mark_id: &str,
+    ) -> std::result::Result<Option<(ConfusionMark, Vec<ConfusionRevision>)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mark_opt = conn
+            .query_row(
+                "SELECT id, project_id, file_path, line_start, line_end, code_snippet, category, confusion_type, explanation, ai_explanation, model, COALESCE(level, 1), resolved_at, resolved_level, user_note, review_exercise_id, concepts_json, created_at FROM marks WHERE id = ?1",
+                params![mark_id],
+                |row| {
+                    Ok(ConfusionMark {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        file_path: row.get(2)?,
+                        line_start: row.get(3)?,
+                        line_end: row.get(4)?,
+                        code_snippet: row.get(5)?,
+                        category: row.get(6)?,
+                        confusion_type: row.get(7)?,
+                        explanation: row.get(8)?,
+                        ai_explanation: row.get(9)?,
+                        model: row.get(10)?,
+                        level: row.get(11)?,
+                        resolved_at: row.get(12)?,
+                        resolved_level: row.get(13)?,
+                        user_note: row.get(14)?,
+                        review_exercise_id: row.get(15)?,
+                        concepts_json: row.get(16)?,
+                        created_at: row.get(17)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        let Some(mark) = mark_opt else {
+            return Ok(None);
+        };
+
+        drop(conn);
+        let revisions = self.list_confusion_revisions(mark_id)?;
+        Ok(Some((mark, revisions)))
+    }
+
+    pub fn reopen_confusion_mark(&self, mark_id: &str) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE marks SET resolved_at = NULL, resolved_level = NULL WHERE id = ?1",
+            params![mark_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_confusion_mark(&self, mark_id: &str) -> std::result::Result<(), StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM marks WHERE id = ?1", params![mark_id])?;
+        tx.execute("DELETE FROM confusion_revisions WHERE mark_id = ?1", params![mark_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stage F7-a: Explanation Feedback Recording & Aggregation
+    pub fn record_explanation_feedback(
+        &self,
+        fb: &ExplanationFeedback,
+    ) -> std::result::Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT OR REPLACE INTO explanation_feedback (id, explanation_id, card_perspective, feedback, note, prompt_version, model, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                fb.id,
+                fb.explanation_id,
+                fb.card_perspective,
+                fb.feedback,
+                fb.note,
+                fb.prompt_version,
+                fb.model,
+                fb.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_feedback_stats(
+        &self,
+        prompt_version: Option<&str>,
+        model: Option<&str>,
+    ) -> std::result::Result<FeedbackStats, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from("SELECT feedback, COUNT(*) FROM explanation_feedback WHERE 1=1 ");
+        if let Some(pv) = prompt_version {
+            sql.push_str(&format!(" AND prompt_version = '{}' ", pv.replace('\'', "''")));
+        }
+        if let Some(m) = model {
+            sql.push_str(&format!(" AND model = '{}' ", m.replace('\'', "''")));
+        }
+        sql.push_str(" GROUP BY feedback ");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+
+        let mut helpful = 0usize;
+        let mut too_generic = 0usize;
+        let mut wrong = 0usize;
+
+        for r in rows {
+            let (fb, cnt) = r?;
+            match fb.as_str() {
+                "helpful" => helpful += cnt as usize,
+                "too_generic" => too_generic += cnt as usize,
+                "wrong" => wrong += cnt as usize,
+                _ => {}
+            }
+        }
+
+        let total = helpful + too_generic + wrong;
+        let too_generic_rate = if total > 0 { too_generic as f32 / total as f32 } else { 0.0 };
+        let wrong_rate = if total > 0 { wrong as f32 / total as f32 } else { 0.0 };
+
+        Ok(FeedbackStats {
+            total,
+            helpful,
+            too_generic,
+            wrong,
+            too_generic_rate,
+            wrong_rate,
+        })
     }
 
     /// Stage C3: Conversation & Message persistence
@@ -1792,6 +2446,8 @@ mod tests {
             resolved_level: None,
             user_note: None,
             created_at: Utc::now().to_rfc3339(),
+            review_exercise_id: None,
+            concepts_json: None,
         };
 
         store.save_mark(&mark).unwrap();
@@ -1983,5 +2639,162 @@ mod tests {
                 let _ = DbStore::open(&local_db);
             }
         }
+    }
+
+    #[test]
+    fn test_f3_explanations_history_and_soft_delete() {
+        let store = DbStore::in_memory().unwrap();
+        // Idempotency: call init_schema again
+        store.init_schema().expect("schema init must be idempotent");
+
+        let exp = CachedExplanation {
+            id: "exp-1".to_string(),
+            project_id: "proj-1".to_string(),
+            file_id: "file-1".to_string(),
+            range: "1-10".to_string(),
+            basis_hash: "hash-abc".to_string(),
+            prompt_version: "v2.0".to_string(),
+            model: "mock-model".to_string(),
+            request_kind: "explain".to_string(),
+            json: r#"{"overall":{"one_sentence":"ROS2 subscriber explanation"}}"#.to_string(),
+            stats: "{}".to_string(),
+            created_at: 1000,
+            title: Some("ROS2 Subscriber Node".to_string()),
+            file_path: Some("src/node.cpp".to_string()),
+            selected_preview: Some("auto sub = create_subscription...".to_string()),
+            pinned: false,
+            deleted: false,
+            depth_mode: Some("standard".to_string()),
+            last_opened_at: Some(1000),
+        };
+
+        store.save_explanation_cache(&exp).unwrap();
+
+        // List explanations
+        let list = store.list_explanations("proj-1", None, None, false, 20, 0).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "exp-1");
+        assert_eq!(list[0].title, "ROS2 Subscriber Node");
+
+        // Pin explanation
+        store.pin_explanation("exp-1", true).unwrap();
+        let pinned_list = store.list_explanations("proj-1", None, None, true, 20, 0).unwrap();
+        assert_eq!(pinned_list.len(), 1);
+
+        // Rename explanation
+        store.rename_explanation("exp-1", "Custom Node Title").unwrap();
+        let fetched = store.get_explanation("exp-1").unwrap().unwrap();
+        assert_eq!(fetched.title.as_deref(), Some("Custom Node Title"));
+
+        // Soft delete
+        store.delete_explanation("exp-1").unwrap();
+        let list_after_delete = store.list_explanations("proj-1", None, None, false, 20, 0).unwrap();
+        assert_eq!(list_after_delete.len(), 0);
+
+        // Soft deleted record returns None
+        assert!(store.get_explanation("exp-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_f5_prompt_presets_and_active() {
+        let store = DbStore::in_memory().unwrap();
+        let presets = store.list_prompt_presets(Some("ask")).unwrap();
+        assert!(!presets.is_empty(), "Builtin presets must be seeded");
+
+        let custom = PromptPreset {
+            id: "custom-1".to_string(),
+            name: "英文导师".to_string(),
+            scope: "ask".to_string(),
+            persona_text: "Please reply entirely in English.".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+            is_active: false,
+            is_builtin: false,
+        };
+        store.save_prompt_preset(&custom).unwrap();
+
+        store.set_active_prompt_preset("custom-1", "ask").unwrap();
+        let active = store.get_active_prompt_preset("ask").unwrap().unwrap();
+        assert_eq!(active.id, "custom-1");
+        assert_eq!(active.name, "英文导师");
+
+        // Reset to default
+        store.reset_prompt_to_default("ask").unwrap();
+        let active_default = store.get_active_prompt_preset("ask").unwrap().unwrap();
+        assert_eq!(active_default.id, "preset-builtin-ask-default");
+    }
+
+    #[test]
+    fn test_f6_confusion_revisions_and_reopen() {
+        let store = DbStore::in_memory().unwrap();
+        let mark = ConfusionMark {
+            id: "mark-test-1".to_string(),
+            project_id: Some("proj-1".to_string()),
+            file_path: "src/lib.rs".to_string(),
+            line_start: 5,
+            line_end: 15,
+            code_snippet: "let x = 42;".to_string(),
+            category: "syntax".to_string(),
+            confusion_type: Some("ownership".to_string()),
+            explanation: Some("analogy".to_string()),
+            ai_explanation: None,
+            model: Some("deepseek".to_string()),
+            level: 1,
+            resolved_at: None,
+            resolved_level: None,
+            user_note: Some("看不懂借用检查器".to_string()),
+            created_at: Utc::now().to_rfc3339(),
+            review_exercise_id: None,
+            concepts_json: Some(r#"["ownership", "borrowing"]"#.to_string()),
+        };
+        store.save_mark(&mark).unwrap();
+
+        let rev = ConfusionRevision {
+            id: "rev-1".to_string(),
+            mark_id: "mark-test-1".to_string(),
+            level: 1,
+            created_at: 1000,
+            model: "deepseek".to_string(),
+            explanation_json: r#"{"analogy":"图书借阅"}"#.to_string(),
+            annotated_json: Some(r#"{"lines":[]}"#.to_string()),
+            similarity_score: 0.1,
+        };
+        store.save_confusion_revision(&rev).unwrap();
+
+        let detail = store.get_confusion_detail("mark-test-1").unwrap().unwrap();
+        assert_eq!(detail.0.id, "mark-test-1");
+        assert_eq!(detail.1.len(), 1);
+        assert_eq!(detail.1[0].level, 1);
+
+        // Resolve and reopen
+        store.update_mark_level_and_resolution("mark-test-1", 1, true).unwrap();
+        let resolved = store.get_confusion_detail("mark-test-1").unwrap().unwrap();
+        assert!(resolved.0.resolved_at.is_some());
+
+        store.reopen_confusion_mark("mark-test-1").unwrap();
+        let reopened = store.get_confusion_detail("mark-test-1").unwrap().unwrap();
+        assert!(reopened.0.resolved_at.is_none());
+    }
+
+    #[test]
+    fn test_f7_explanation_feedback() {
+        let store = DbStore::in_memory().unwrap();
+        let fb = ExplanationFeedback {
+            id: "fb-1".to_string(),
+            explanation_id: "exp-1".to_string(),
+            card_perspective: "logic".to_string(),
+            feedback: "too_generic".to_string(),
+            note: Some("缺少具体的输入输出追踪".to_string()),
+            prompt_version: Some("v2.0".to_string()),
+            model: Some("deepseek-v4-flash".to_string()),
+            created_at: 1000,
+        };
+        store.record_explanation_feedback(&fb).unwrap();
+
+        let stats = store.get_feedback_stats(None, None).unwrap();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.too_generic, 1);
+        assert_eq!(stats.helpful, 0);
+        assert!((stats.too_generic_rate - 1.0).abs() < 1e-4);
     }
 }
