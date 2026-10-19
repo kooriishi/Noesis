@@ -1075,4 +1075,54 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_concurrent_workspace_indexing() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("noesis_idx_test_proj_{}", ts));
+        let temp_db = std::env::temp_dir().join(format!("noesis_idx_test_db_{}.db", ts));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Generate 200 dummy python files
+        for i in 0..200 {
+            let fpath = temp_dir.join(format!("file_{:03}.py", i));
+            fs::write(&fpath, format!("def func_{}():\n    return {}\n", i, i)).unwrap();
+        }
+
+        // Initialize DB store first to ensure schema exists
+        {
+            let store = DbStore::open(&temp_db).expect("create test db");
+            let _ = store.ensure_schema();
+        }
+
+        let db_path_1 = temp_db.clone();
+        let proj_dir_1 = temp_dir.clone();
+        let handle1 = std::thread::spawn(move || {
+            let store = DbStore::open(&db_path_1).expect("open store 1");
+            let indexer = CodeIndexer::new();
+            indexer.index_workspace(&proj_dir_1, &store, &[])
+        });
+
+        let db_path_2 = temp_db.clone();
+        let proj_dir_2 = temp_dir.clone();
+        let handle2 = std::thread::spawn(move || {
+            let store = DbStore::open(&db_path_2).expect("open store 2");
+            let indexer = CodeIndexer::new();
+            indexer.index_workspace(&proj_dir_2, &store, &[])
+        });
+
+        let res1 = handle1.join().expect("thread 1 panic");
+        let res2 = handle2.join().expect("thread 2 panic");
+
+        assert!(res1.is_ok(), "indexer thread 1 failed: {:?}", res1.err());
+        assert!(res2.is_ok(), "indexer thread 2 failed: {:?}", res2.err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_file(&temp_db);
+        let _ = fs::remove_file(format!("{}-wal", temp_db.to_string_lossy()));
+        let _ = fs::remove_file(format!("{}-shm", temp_db.to_string_lossy()));
+    }
 }

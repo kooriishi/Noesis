@@ -1,0 +1,26 @@
+[package]
+name = "noesis-commands"
+version = "0.1.2"
+edition = "2021"
+description = "NOESIS - Shared Command Handlers for Tauri and Linux Apps"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
+tracing = "0.1"
+anyhow = "1.0"
+regex = "1.11"
+
+# Internal Crates
+noesis-project = { path = "../project" }
+noesis-indexer = { path = "../indexer" }
+noesis-lsp = { path = "../lsp" }
+noesis-llm = { path = "../llm" }
+noesis-learn = { path = "../learn" }
+noesis-runner = { path = "../runner" }
+noesis-store = { path = "../store" }
+noesis-ros2 = { path = "../ros2" }
+noesis-llmapp = { path = "../llmapp" }

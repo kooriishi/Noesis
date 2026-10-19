@@ -592,6 +592,47 @@ impl LlmGateway {
         Ok(content)
     }
 
+    pub async fn send_chat_raw(
+        &self,
+        config: &LlmConfig,
+        body_val: serde_json::Value,
+    ) -> Result<serde_json::Value, LlmError> {
+        if config.offline_mode {
+            return Err(LlmError::OutboundBlocked(
+                "当前处于完全离线模式 (Offline Mode)，已禁止任何外部网络请求。".to_string(),
+            ));
+        }
+        if config.api_key.trim().is_empty() && config.provider != "ollama" {
+            return Err(LlmError::Api(
+                "未配置模型 API Key。请在右侧「模型/安全」面板中配置有效的 API 密钥。".to_string(),
+            ));
+        }
+        let client = self.build_http_client(config)?;
+        let base = config.api_url.trim_end_matches('/');
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{}/chat/completions", base)
+        };
+        let mut req_builder = client.post(&url).header("Content-Type", "application/json");
+        if !config.api_key.trim().is_empty() {
+            req_builder =
+                req_builder.header("Authorization", format!("Bearer {}", config.api_key.trim()));
+        }
+        let resp = req_builder.json(&body_val).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api(format!(
+                "API 请求失败 (HTTP {}): {}",
+                status.as_u16(),
+                err_text
+            )));
+        }
+        let res_json: serde_json::Value = resp.json().await?;
+        Ok(res_json)
+    }
+
     pub async fn send_chat_stream<F>(
         &self,
         config: &LlmConfig,

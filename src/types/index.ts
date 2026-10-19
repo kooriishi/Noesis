@@ -318,6 +318,9 @@ export interface RunRequest {
   language: string;
   code: string;
   timeout_seconds?: number;
+  stdin?: string;
+  cpp_standard?: string;
+  extra_args?: string;
 }
 
 export interface RunResponse {
@@ -327,6 +330,9 @@ export interface RunResponse {
   duration_ms: number;
   success: boolean;
   truncated?: boolean;
+  phase?: 'compile' | 'run' | string;
+  compile_stdout?: string;
+  compile_stderr?: string;
 }
 
 export interface ExerciseRecord {

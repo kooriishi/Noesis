@@ -34,6 +34,7 @@ import {
   SystemStatus,
   ChatMessage,
   OutboundPreview,
+  RunRequest,
   RunResponse,
   ExerciseRecord,
   TabItem,
@@ -165,6 +166,60 @@ export const ShellLayout: React.FC = () => {
   const [showScratch, setShowScratch] = useState<boolean>(false);
   const [scratchCode, setScratchCode] = useState<string>('');
   const [scratchLanguage, setScratchLanguage] = useState<string>('javascript');
+
+  // G6: Draggable Bottom Drawer State
+  const [drawerHeight, setDrawerHeight] = useState<number>(() => {
+    const saved = localStorage.getItem('noesis_bottom_drawer_height');
+    if (saved) {
+      const val = parseInt(saved, 10);
+      if (!isNaN(val) && val >= 120) return val;
+    }
+    return 280;
+  });
+  const [isDraggingDrawer, setIsDraggingDrawer] = useState(false);
+  const drawerDragStartYRef = useRef<number>(0);
+  const drawerDragStartHeightRef = useRef<number>(280);
+
+  const handleDrawerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsDraggingDrawer(true);
+    drawerDragStartYRef.current = e.clientY;
+    drawerDragStartHeightRef.current = drawerHeight;
+  };
+
+  const handleDrawerPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingDrawer) return;
+    const deltaY = drawerDragStartYRef.current - e.clientY;
+    const maxHeight = Math.max(160, window.innerHeight - 160);
+    const newHeight = Math.max(120, Math.min(maxHeight, drawerDragStartHeightRef.current + deltaY));
+    setDrawerHeight(newHeight);
+    localStorage.setItem('noesis_bottom_drawer_height', String(newHeight));
+  };
+
+  const handleDrawerPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDraggingDrawer) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {}
+      setIsDraggingDrawer(false);
+    }
+  };
+
+  const handleDrawerDoubleClick = () => {
+    const maxHeight = Math.max(280, window.innerHeight - 200);
+    setDrawerHeight((prev) => {
+      let next: number;
+      if (prev <= 130) {
+        next = 280;
+      } else if (prev < maxHeight - 20) {
+        next = maxHeight;
+      } else {
+        next = 120;
+      }
+      localStorage.setItem('noesis_bottom_drawer_height', String(next));
+      return next;
+    });
+  };
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
@@ -650,8 +705,8 @@ ${snippet}
     setShowScratch(true);
   };
 
-  const handleRunScratchCode = async (language: string, code: string): Promise<RunResponse> => {
-    return await ApiService.runScratchCode({ language, code });
+  const handleRunScratchCode = async (req: RunRequest): Promise<RunResponse> => {
+    return await ApiService.runScratchCode(req);
   };
 
   const handleSendChat = async (messages: ChatMessage[]): Promise<string> => {
@@ -1066,16 +1121,37 @@ ${snippet}
             )}
           </div>
 
-          {/* Bottom Docked Scratch Runner */}
+          {/* Bottom Docked Scratch Runner (G6 Draggable Drawer) */}
           {showScratch && (
-            <div style={{ height: '260px', flexShrink: 0 }}>
-              <ScratchRunner
-                initialCode={scratchCode}
-                initialLanguage={scratchLanguage}
-                onRunCode={handleRunScratchCode}
-                dueReviews={dueReviews}
-                onClose={() => setShowScratch(false)}
+            <div style={{ display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+              <div
+                onPointerDown={handleDrawerPointerDown}
+                onPointerMove={handleDrawerPointerMove}
+                onPointerUp={handleDrawerPointerUp}
+                onDoubleClick={handleDrawerDoubleClick}
+                style={{
+                  height: '4px',
+                  cursor: 'row-resize',
+                  background: isDraggingDrawer ? '#89b4fa' : '#313244',
+                  transition: 'background 0.15s ease',
+                  zIndex: 25,
+                  userSelect: 'none',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = '#89b4fa')}
+                onMouseLeave={(e) => {
+                  if (!isDraggingDrawer) e.currentTarget.style.background = '#313244';
+                }}
+                title="拖拽调节高度 (120px - 窗口高度-160px)，双击循环切换 120px / 280px / 最大高度"
               />
+              <div style={{ height: `${drawerHeight}px`, overflow: 'hidden' }}>
+                <ScratchRunner
+                  initialCode={scratchCode}
+                  initialLanguage={scratchLanguage}
+                  onRunCode={handleRunScratchCode}
+                  dueReviews={dueReviews}
+                  onClose={() => setShowScratch(false)}
+                />
+              </div>
             </div>
           )}
         </div>

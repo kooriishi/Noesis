@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles,
   HelpCircle,
@@ -128,6 +128,22 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [celebrationMarkId, setCelebrationMarkId] = useState<string | null>(null);
   const [confusionFilter, setConfusionFilter] = useState<'all' | 'unresolved' | 'resolved'>('all');
+
+  // G6: AI Sidebar Scroll & Stick-to-bottom
+  const contentAreaRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef<boolean>(true);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
+    isAtBottomRef.current = atBottom;
+  };
+
+  useEffect(() => {
+    if (isStreaming && isAtBottomRef.current && contentAreaRef.current) {
+      contentAreaRef.current.scrollTop = contentAreaRef.current.scrollHeight;
+    }
+  }, [chatMessages, isStreaming]);
 
   useEffect(() => {
     if (activeSidebarTab) {
@@ -591,7 +607,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       </div>
 
       {/* Content Area */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
+      <div
+        ref={contentAreaRef}
+        onScroll={handleScroll}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
+          padding: '12px',
+        }}
+      >
         {/* ===================== TAB 1: CARDS ===================== */}
         {activeTab === 'cards' && (
           <div>
@@ -1020,7 +1046,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       <ul style={{ margin: '8px 0', paddingLeft: '16px', fontSize: '12px', color: 'var(--noesis-text-muted, #a6adc8)', lineHeight: '1.5' }}>
                         {card.key_bullets.map((b, i) => (
                           <li key={i} style={{ marginBottom: '4px' }}>
-                            <MarkdownRenderer content={b} fontSize={12} />
+                            <MarkdownRenderer content={b} fontSize={12} onJumpToCitation={onJumpToCitation} />
                           </li>
                         ))}
                       </ul>
@@ -1044,7 +1070,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             lineHeight: '1.6',
                           }}
                         >
-                          <MarkdownRenderer content={card.detailed_body} fontSize={12} />
+                          <MarkdownRenderer content={card.detailed_body} fontSize={12} onJumpToCitation={onJumpToCitation} />
                         </div>
                       )}
 
@@ -1362,7 +1388,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                     {parsed?.analogy && (
                                       <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary, #cdd6f4)', lineHeight: '1.4' }}>
                                         <strong>💡 通俗类比：</strong>
-                                        <MarkdownRenderer content={parsed.analogy} fontSize={12} />
+                                        <MarkdownRenderer content={parsed.analogy} fontSize={12} onJumpToCitation={onJumpToCitation} />
                                       </div>
                                     )}
 
@@ -1505,8 +1531,6 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
             {/* Messages Scroll Area */}
             <div
               style={{
-                flex: 1,
-                overflowY: 'auto',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '10px',
@@ -1532,7 +1556,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
                   ) : (
                     <div>
-                      <MarkdownRenderer content={m.content} fontSize={12} />
+                      <MarkdownRenderer content={m.content} fontSize={12} currentFilePath={contextChip?.file} onJumpToCitation={onJumpToCitation} />
                       {/* Citation badges for assistant response (F4) */}
                       {m.citations && m.citations.length > 0 && (
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '8px', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>

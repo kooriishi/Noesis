@@ -1,62 +1,211 @@
-import React, { useState } from 'react';
-import { Copy, Check } from 'lucide-react';
+import React, { useState, useEffect, useRef, useId } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import katex from 'katex';
+import { Copy, Check, AlertCircle } from 'lucide-react';
 
-interface MarkdownRendererProps {
+export interface MarkdownRendererProps {
   content: string;
   fontSize?: number;
+  currentFilePath?: string;
+  onJumpToCitation?: (filePath: string, startLine: number, endLine: number) => void;
 }
 
-function renderInline(text: string): React.ReactNode[] {
-  // Matches inline code `code`, bold **text**, and italic *text*
-  const tokens: React.ReactNode[] = [];
-  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
+// -----------------------------------------------------------------------------
+// Mermaid Async Loader & Dynamic Component
+// -----------------------------------------------------------------------------
 
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      tokens.push(text.slice(lastIndex, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith('`') && token.endsWith('`')) {
-      tokens.push(
-        <code
-          key={`code-${match.index}`}
+let mermaidPromise: Promise<any> | null = null;
+function getMermaid() {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid').then((m) => {
+      m.default.initialize({
+        startOnLoad: false,
+        theme: 'dark',
+        securityLevel: 'strict',
+        themeVariables: {
+          darkMode: true,
+          background: '#11111b',
+          primaryColor: '#89b4fa',
+          primaryTextColor: '#cdd6f4',
+          primaryBorderColor: '#313244',
+          lineColor: '#89b4fa',
+          secondaryColor: '#313244',
+          tertiaryColor: '#181825',
+          fontFamily: 'Consolas, Monaco, sans-serif',
+        },
+      });
+      return m.default;
+    });
+  }
+  return mermaidPromise;
+}
+
+const MermaidBlock: React.FC<{ code: string }> = ({ code }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [svg, setSvg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const uniqueId = useId().replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    const renderGraph = async () => {
+      const trimmed = code.trim();
+      if (!trimmed) {
+        setSvg(null);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const mermaid = await getMermaid();
+        if (cancelled) return;
+        const renderId = `mermaid_${uniqueId}_${Date.now()}`;
+        const { svg: renderedSvg } = await mermaid.render(renderId, trimmed);
+        if (!cancelled) {
+          setSvg(renderedSvg);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err?.message || '图表语法有误');
+          setLoading(false);
+        }
+      }
+    };
+
+    renderGraph();
+    return () => {
+      cancelled = true;
+    };
+  }, [code, uniqueId]);
+
+  if (error) {
+    return (
+      <div
+        style={{
+          margin: '8px 0',
+          background: '#181825',
+          border: '1px solid rgba(243, 139, 168, 0.3)',
+          borderRadius: '6px',
+          padding: '8px 12px',
+        }}
+      >
+        <div
           style={{
-            background: '#11111b',
-            color: '#f9e2af',
-            padding: '1px 5px',
-            borderRadius: '4px',
-            fontSize: '0.9em',
-            fontFamily: 'Consolas, Monaco, monospace',
-            border: '1px solid #313244',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            color: '#f38ba8',
+            fontSize: '11px',
+            marginBottom: '6px',
           }}
         >
-          {token.slice(1, -1)}
-        </code>
-      );
-    } else if (token.startsWith('**') && token.endsWith('**')) {
-      tokens.push(
-        <strong key={`bold-${match.index}`} style={{ color: '#cdd6f4', fontWeight: 600 }}>
-          {token.slice(2, -2)}
-        </strong>
-      );
-    } else if (token.startsWith('*') && token.endsWith('*')) {
-      tokens.push(
-        <em key={`italic-${match.index}`} style={{ color: '#bac2de' }}>
-          {token.slice(1, -1)}
-        </em>
-      );
+          <AlertCircle size={13} />
+          <span>图表语法有误</span>
+        </div>
+        <pre
+          style={{
+            margin: 0,
+            fontSize: '11px',
+            color: '#a6adc8',
+            fontFamily: 'Consolas, Monaco, monospace',
+            overflowX: 'auto',
+          }}
+        >
+          <code>{code}</code>
+        </pre>
+      </div>
+    );
+  }
+
+  if (loading && !svg) {
+    return (
+      <div
+        style={{
+          margin: '8px 0',
+          padding: '16px',
+          textAlign: 'center',
+          background: '#181825',
+          border: '1px solid #313244',
+          borderRadius: '6px',
+          color: '#6c7086',
+          fontSize: '11px',
+        }}
+      >
+        渲染图表中...
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        margin: '10px 0',
+        padding: '12px',
+        background: '#181825',
+        border: '1px solid #313244',
+        borderRadius: '6px',
+        overflowX: 'auto',
+        textAlign: 'center',
+      }}
+      dangerouslySetInnerHTML={{ __html: svg || '' }}
+    />
+  );
+};
+
+// -----------------------------------------------------------------------------
+// LaTeX Block
+// -----------------------------------------------------------------------------
+
+const LatexBlock: React.FC<{ code: string }> = ({ code }) => {
+  const [html, setHtml] = useState<string>('');
+
+  useEffect(() => {
+    try {
+      const rendered = katex.renderToString(code.trim(), {
+        displayMode: true,
+        throwOnError: false,
+      });
+      setHtml(rendered);
+    } catch {
+      setHtml('');
     }
-    lastIndex = regex.lastIndex;
+  }, [code]);
+
+  if (!html) {
+    return (
+      <pre style={{ margin: '8px 0', padding: '8px', background: '#11111b', color: '#cdd6f4' }}>
+        <code>{code}</code>
+      </pre>
+    );
   }
 
-  if (lastIndex < text.length) {
-    tokens.push(text.slice(lastIndex));
-  }
+  return (
+    <div
+      style={{
+        margin: '8px 0',
+        padding: '8px 12px',
+        background: '#181825',
+        borderRadius: '6px',
+        overflowX: 'auto',
+      }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
 
-  return tokens.length > 0 ? tokens : [text];
-}
+// -----------------------------------------------------------------------------
+// Standard Code Block with Copy
+// -----------------------------------------------------------------------------
 
 const CodeBlock: React.FC<{ language: string; code: string }> = ({ language, code }) => {
   const [copied, setCopied] = useState(false);
@@ -125,118 +274,293 @@ const CodeBlock: React.FC<{ language: string; code: string }> = ({ language, cod
   );
 };
 
-export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, fontSize = 12 }) => {
+// -----------------------------------------------------------------------------
+// Citation Badge Link Helper
+// -----------------------------------------------------------------------------
+
+const CITATION_REGEX = /\[(?:([a-zA-Z0-9_\-./\\]+):)?L(\d+)(?:-L?(\d+))?\]/g;
+
+function renderTextWithCitations(
+  text: string,
+  currentFilePath?: string,
+  onJumpToCitation?: (filePath: string, startLine: number, endLine: number) => void
+): React.ReactNode {
+  if (!text || !text.includes('[L') && !text.includes(':L')) {
+    return text;
+  }
+
+  const elements: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  CITATION_REGEX.lastIndex = 0;
+
+  while ((match = CITATION_REGEX.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      elements.push(text.slice(lastIndex, match.index));
+    }
+
+    const file = match[1] || currentFilePath || '';
+    const startLine = parseInt(match[2], 10) || 1;
+    const endLine = match[3] ? parseInt(match[3], 10) : startLine;
+    const badgeText = match[1]
+      ? `${match[1].split('/').pop()}:L${startLine}${endLine !== startLine ? `-${endLine}` : ''}`
+      : `L${startLine}${endLine !== startLine ? `-${endLine}` : ''}`;
+
+    elements.push(
+      <button
+        key={`cit-${match.index}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (onJumpToCitation && file) {
+            onJumpToCitation(file, startLine, endLine);
+          }
+        }}
+        title={`跳转到 ${file}:${startLine}-${endLine}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '2px',
+          padding: '1px 5px',
+          margin: '0 2px',
+          borderRadius: '4px',
+          fontSize: '10.5px',
+          fontFamily: 'Consolas, Monaco, monospace',
+          background: 'rgba(137, 180, 250, 0.14)',
+          border: '1px solid rgba(137, 180, 250, 0.35)',
+          color: '#89b4fa',
+          cursor: onJumpToCitation && file ? 'pointer' : 'default',
+          verticalAlign: 'baseline',
+          lineHeight: '1.2',
+        }}
+      >
+        📍 {badgeText}
+      </button>
+    );
+
+    lastIndex = CITATION_REGEX.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    elements.push(text.slice(lastIndex));
+  }
+
+  return elements.length > 0 ? elements : text;
+}
+
+function processChildren(
+  children: React.ReactNode,
+  currentFilePath?: string,
+  onJumpToCitation?: (filePath: string, startLine: number, endLine: number) => void
+): React.ReactNode {
+  return React.Children.map(children, (child) => {
+    if (typeof child === 'string') {
+      return renderTextWithCitations(child, currentFilePath, onJumpToCitation);
+    }
+    return child;
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Main MarkdownRenderer Component
+// -----------------------------------------------------------------------------
+
+export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
+  content,
+  fontSize = 12,
+  currentFilePath,
+  onJumpToCitation,
+}) => {
   if (!content) return null;
 
-  const lines = content.split('\n');
-  const elements: React.ReactNode[] = [];
+  return (
+    <div
+      className="noesis-markdown"
+      style={{
+        fontSize: `${fontSize}px`,
+        color: '#cdd6f4',
+        lineHeight: 1.6,
+      }}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={{
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className || '');
+            const lang = match ? match[1].toLowerCase() : '';
+            const codeString = String(children).replace(/\n$/, '');
 
-  let inCodeBlock = false;
-  let codeBlockLang = '';
-  let codeBlockLines: string[] = [];
+            if (lang === 'mermaid') {
+              return <MermaidBlock code={codeString} />;
+            }
+            if (lang === 'latex' || lang === 'math') {
+              return <LatexBlock code={codeString} />;
+            }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+            // Inline code
+            const isInline = !className && !codeString.includes('\n');
+            if (isInline) {
+              return (
+                <code
+                  style={{
+                    background: '#11111b',
+                    color: '#f9e2af',
+                    padding: '1px 5px',
+                    borderRadius: '4px',
+                    fontSize: '0.9em',
+                    fontFamily: 'Consolas, Monaco, monospace',
+                    border: '1px solid #313244',
+                  }}
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            }
 
-    // Check code fences
-    if (line.trim().startsWith('```')) {
-      if (inCodeBlock) {
-        elements.push(
-          <CodeBlock
-            key={`cb-${i}`}
-            language={codeBlockLang}
-            code={codeBlockLines.join('\n')}
-          />
-        );
-        inCodeBlock = false;
-        codeBlockLines = [];
-        codeBlockLang = '';
-      } else {
-        inCodeBlock = true;
-        codeBlockLang = line.trim().slice(3).trim();
-        codeBlockLines = [];
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeBlockLines.push(line);
-      continue;
-    }
-
-    const trimmed = line.trim();
-
-    // Headers
-    if (trimmed.startsWith('#### ')) {
-      elements.push(
-        <h4 key={`h4-${i}`} style={{ color: '#89b4fa', fontSize: `${fontSize + 1}px`, margin: '10px 0 4px', fontWeight: 600 }}>
-          {renderInline(trimmed.slice(5))}
-        </h4>
-      );
-    } else if (trimmed.startsWith('### ')) {
-      elements.push(
-        <h3 key={`h3-${i}`} style={{ color: '#89b4fa', fontSize: `${fontSize + 2}px`, margin: '12px 0 6px', fontWeight: 600 }}>
-          {renderInline(trimmed.slice(4))}
-        </h3>
-      );
-    } else if (trimmed.startsWith('## ')) {
-      elements.push(
-        <h2 key={`h2-${i}`} style={{ color: '#cba6f7', fontSize: `${fontSize + 3}px`, margin: '14px 0 6px', fontWeight: 600 }}>
-          {renderInline(trimmed.slice(3))}
-        </h2>
-      );
-    } else if (trimmed.startsWith('# ')) {
-      elements.push(
-        <h1 key={`h1-${i}`} style={{ color: '#fab387', fontSize: `${fontSize + 4}px`, margin: '16px 0 8px', fontWeight: 700 }}>
-          {renderInline(trimmed.slice(2))}
-        </h1>
-      );
-    } else if (trimmed === '---' || trimmed === '***') {
-      elements.push(<hr key={`hr-${i}`} style={{ border: 'none', borderTop: '1px solid #313244', margin: '10px 0' }} />);
-    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      elements.push(
-        <div key={`li-${i}`} style={{ display: 'flex', gap: '6px', margin: '3px 0', paddingLeft: '6px' }}>
-          <span style={{ color: '#89b4fa', userSelect: 'none' }}>•</span>
-          <span style={{ color: '#bac2de', lineHeight: '1.5' }}>{renderInline(trimmed.slice(2))}</span>
-        </div>
-      );
-    } else if (trimmed.startsWith('> ')) {
-      elements.push(
-        <blockquote
-          key={`quote-${i}`}
-          style={{
-            margin: '6px 0',
-            paddingLeft: '10px',
-            borderLeft: '3px solid #89b4fa',
-            color: '#a6adc8',
-            fontStyle: 'italic',
-            lineHeight: '1.5',
-          }}
-        >
-          {renderInline(trimmed.slice(2))}
-        </blockquote>
-      );
-    } else if (trimmed.length > 0) {
-      elements.push(
-        <p key={`p-${i}`} style={{ margin: '4px 0', color: '#bac2de', lineHeight: '1.6' }}>
-          {renderInline(line)}
-        </p>
-      );
-    } else {
-      // Empty line spacer
-      elements.push(<div key={`sp-${i}`} style={{ height: '4px' }} />);
-    }
-  }
-
-  if (inCodeBlock && codeBlockLines.length > 0) {
-    elements.push(
-      <CodeBlock
-        key="cb-tail"
-        language={codeBlockLang}
-        code={codeBlockLines.join('\n')}
-      />
-    );
-  }
-
-  return <div style={{ fontSize: `${fontSize}px` }}>{elements}</div>;
+            return <CodeBlock language={lang} code={codeString} />;
+          },
+          p({ children }) {
+            return (
+              <p style={{ margin: '4px 0', color: '#bac2de' }}>
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </p>
+            );
+          },
+          li({ children }) {
+            return (
+              <li style={{ margin: '2px 0', color: '#bac2de' }}>
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </li>
+            );
+          },
+          h1({ children }) {
+            return (
+              <h1
+                style={{
+                  color: '#fab387',
+                  fontSize: `${fontSize + 4}px`,
+                  margin: '16px 0 8px',
+                  fontWeight: 700,
+                  borderBottom: '1px solid #313244',
+                  paddingBottom: '4px',
+                }}
+              >
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </h1>
+            );
+          },
+          h2({ children }) {
+            return (
+              <h2
+                style={{
+                  color: '#cba6f7',
+                  fontSize: `${fontSize + 3}px`,
+                  margin: '14px 0 6px',
+                  fontWeight: 600,
+                }}
+              >
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </h2>
+            );
+          },
+          h3({ children }) {
+            return (
+              <h3
+                style={{
+                  color: '#89b4fa',
+                  fontSize: `${fontSize + 2}px`,
+                  margin: '12px 0 6px',
+                  fontWeight: 600,
+                }}
+              >
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </h3>
+            );
+          },
+          h4({ children }) {
+            return (
+              <h4
+                style={{
+                  color: '#89b4fa',
+                  fontSize: `${fontSize + 1}px`,
+                  margin: '10px 0 4px',
+                  fontWeight: 600,
+                }}
+              >
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </h4>
+            );
+          },
+          table({ children }) {
+            return (
+              <div style={{ overflowX: 'auto', margin: '8px 0' }}>
+                <table
+                  style={{
+                    width: '100%',
+                    borderCollapse: 'collapse',
+                    fontSize: '0.9em',
+                    border: '1px solid #313244',
+                  }}
+                >
+                  {children}
+                </table>
+              </div>
+            );
+          },
+          thead({ children }) {
+            return <thead style={{ background: '#181825' }}>{children}</thead>;
+          },
+          th({ children }) {
+            return (
+              <th
+                style={{
+                  border: '1px solid #313244',
+                  padding: '6px 10px',
+                  textAlign: 'left',
+                  color: '#89b4fa',
+                  fontWeight: 600,
+                }}
+              >
+                {children}
+              </th>
+            );
+          },
+          td({ children }) {
+            return (
+              <td
+                style={{
+                  border: '1px solid #313244',
+                  padding: '6px 10px',
+                  color: '#cdd6f4',
+                }}
+              >
+                {processChildren(children, currentFilePath, onJumpToCitation)}
+              </td>
+            );
+          },
+          blockquote({ children }) {
+            return (
+              <blockquote
+                style={{
+                  margin: '6px 0',
+                  paddingLeft: '10px',
+                  borderLeft: '3px solid #89b4fa',
+                  color: '#a6adc8',
+                  fontStyle: 'italic',
+                }}
+              >
+                {children}
+              </blockquote>
+            );
+          },
+          hr() {
+            return <hr style={{ border: 'none', borderTop: '1px solid #313244', margin: '10px 0' }} />;
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 };

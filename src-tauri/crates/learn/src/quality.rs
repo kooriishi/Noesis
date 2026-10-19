@@ -1,8 +1,22 @@
 use crate::verifier::StructuredExplanation;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LayerQualityReport {
+    pub passed: bool,
+    pub score: f32,
+    pub missing_sections: Vec<String>,
+    pub word_count: usize,
+    pub min_word_count: usize,
+    pub has_mermaid: bool,
+    pub line_coverage_percent: f32,
+    pub generic_phrases_count: usize,
+    pub issues: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QualityReport {
@@ -185,6 +199,169 @@ impl QualityGate {
         }
 
         idents
+    }
+
+    /// Evaluates a single layer's markdown output against G3/G5 quality criteria
+    pub fn evaluate_layer(
+        layer: &str,
+        markdown: &str,
+        selected_code: &str,
+        is_deep: bool,
+        generic_phrases: &[String],
+    ) -> LayerQualityReport {
+        let mut issues = Vec::new();
+        let mut missing_sections = Vec::new();
+        let char_count = markdown.chars().count();
+
+        // 1. Required sections & word count by layer
+        let (required_sections, min_chars): (Vec<&str>, usize) = match layer {
+            "overall" => (
+                vec![
+                    "## 一句话定位",
+                    "## 模块介绍",
+                    "## 在项目中的作用",
+                    "## 在当前代码中的作用",
+                    "## 简单类比",
+                    "## 接下来读什么",
+                ],
+                if is_deep { 1200 } else { 600 },
+            ),
+            "logic" => (
+                vec![
+                    "## 输入与输出",
+                    "## 数据流向图",
+                    "## 运行逻辑",
+                    "## 算法介绍",
+                    "## 简单例子",
+                    "## 分支与异常",
+                ],
+                if is_deep { 2000 } else { 1000 },
+            ),
+            "syntax" => (
+                vec![
+                    "## 重点语法",
+                    "## 逐行注释",
+                    "## 易错点",
+                ],
+                if is_deep { 1000 } else { 500 },
+            ),
+            "principle" => {
+                if markdown.contains("不适用") || markdown.contains("【原理判定】不适用") {
+                    return LayerQualityReport {
+                        passed: true,
+                        score: 1.0,
+                        word_count: char_count,
+                        min_word_count: 20,
+                        has_mermaid: false,
+                        line_coverage_percent: 100.0,
+                        generic_phrases_count: 0,
+                        missing_sections: vec![],
+                        issues: vec![],
+                    };
+                }
+                let has_math = markdown.contains("数学原理") || markdown.contains("公式");
+                let sections = if has_math {
+                    vec!["## 问题定义", "## 公式", "## 符号与代码对照", "## 代入计算"]
+                } else {
+                    vec!["## 机制分层", "## 时序图", "## 和本段代码设计的关系"]
+                };
+                (sections, if is_deep { 1500 } else { 800 })
+            }
+            _ => (vec![], 300),
+        };
+
+        for sec in &required_sections {
+            let title = sec.trim_start_matches('#').trim();
+            if !markdown.contains(sec) && !markdown.contains(title) {
+                missing_sections.push(sec.to_string());
+                issues.push(format!("缺少必需章节：{}", sec));
+            }
+        }
+
+        // 70% threshold check
+        let threshold = (min_chars as f32 * 0.70) as usize;
+        if char_count < threshold {
+            issues.push(format!(
+                "字数不足下限的 70%：当前 {} 字，要求至少 {} 字（基准 {} 字）",
+                char_count, threshold, min_chars
+            ));
+        }
+
+        // 2. Logic layer mermaid check
+        let mut has_mermaid = false;
+        if layer == "logic" {
+            has_mermaid = markdown.contains("```mermaid");
+            if !has_mermaid {
+                issues.push("逻辑层缺少必需的 ```mermaid 数据流向图".to_string());
+            }
+        }
+
+        // 3. Syntax layer line coverage check
+        let mut line_coverage_percent = 100.0;
+        if layer == "syntax" {
+            let total_code_lines = selected_code
+                .lines()
+                .filter(|l| {
+                    let trimmed = l.trim();
+                    !trimmed.is_empty() && trimmed != "{" && trimmed != "}" && trimmed != "};"
+                })
+                .count();
+
+            let mut covered_lines = 0usize;
+            if let Some(json_start) = markdown.find("```json") {
+                if let Some(json_end) = markdown[json_start + 7..].find("```") {
+                    let json_str = markdown[json_start + 7..json_start + 7 + json_end].trim();
+                    if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(json_str) {
+                        covered_lines = arr.len();
+                    }
+                }
+            } else if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(markdown.trim()) {
+                covered_lines = arr.len();
+            }
+
+            if total_code_lines > 0 {
+                line_coverage_percent = (covered_lines as f32 / total_code_lines as f32) * 100.0;
+                if line_coverage_percent < 95.0 && total_code_lines <= 100 {
+                    issues.push(format!(
+                        "逐行注释覆盖率低于 95%：选区有效行数 {}，注释覆盖 {} 行（{:.1}%）",
+                        total_code_lines, covered_lines, line_coverage_percent
+                    ));
+                }
+            }
+        }
+
+        // 4. Generic phrases check
+        let mut generic_phrases_count = 0;
+        for phrase in generic_phrases {
+            if !phrase.is_empty() && markdown.contains(phrase) {
+                generic_phrases_count += 1;
+            }
+        }
+        if generic_phrases_count > 2 {
+            issues.push(format!(
+                "命中套话短语超过 2 处（共命中 {} 处），请使用项目具体标识符替换",
+                generic_phrases_count
+            ));
+        }
+
+        let passed = issues.is_empty();
+        let score = if passed {
+            1.0
+        } else {
+            (1.0 - (issues.len() as f32 * 0.2)).max(0.0)
+        };
+
+        LayerQualityReport {
+            passed,
+            score,
+            missing_sections,
+            word_count: char_count,
+            min_word_count: min_chars,
+            has_mermaid,
+            line_coverage_percent,
+            generic_phrases_count,
+            issues,
+        }
     }
 }
 

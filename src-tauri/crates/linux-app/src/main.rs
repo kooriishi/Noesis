@@ -1,1194 +1,522 @@
-use noesis_indexer::{CodeIndexer, DomainAdapter, ProjectMap};
-use noesis_learn::context::{
-    ContextAssembler, ContextManifest, ContextRequest, DroppedItem, HeuristicTokenEstimator,
-    PROMPT_VERSION,
-};
-use noesis_learn::exercises::{
-    compute_sm2_review, generate_cloze_exercise, generate_fact_exercises,
-    grade_deterministic_answer, map_answer_to_quality, refresh_project_exercises_freshness,
-    Sm2ReviewState,
-};
-use noesis_learn::knowledge::KnowledgeBase;
-use noesis_learn::verifier::{
-    extract_and_parse_explanation_json, CitationVerifier, StructuredExplanation,
-    VerificationSummary,
-};
-use noesis_learn::LearnEngine;
-use noesis_llm::stream::CancellationRegistry;
-use noesis_llm::{ChatMessage, CredentialStore, LlmConfig, LlmGateway};
-use noesis_llmapp::LlmAppAdapter;
-use noesis_lsp::LspManager;
-use noesis_project::ProjectManager;
-use noesis_ros2::Ros2Adapter;
-use noesis_runner::{CodeRunner, RunRequest};
-use noesis_store::{
-    CachedExplanation, ConfusionMark, DbStore, ExplanationFeedback, PromptPreset,
-    StoredMessageRecord,
-};
-use serde::{Deserialize, Serialize};
+use fs2::FileExt;
+use include_dir::{include_dir, Dir};
+use noesis_commands::{dispatch, AppState, EventSink, ACTIVE_TASKS, IS_INDEXING};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 
-const EXPERT_SYSTEM_PROMPT: &str = include_str!("../../../../prompts/code_guide_expert.system.md");
-const LOCKED_RULES_PROMPT: &str = include_str!("../../../../prompts/rules.locked.md");
-const DEFAULT_PERSONA_PROMPT: &str = include_str!("../../../../prompts/persona.default.md");
-const DIST_INDEX_HTML: &str = include_str!("../../../../dist/index.html");
-const DIST_CSS: &[u8] = include_bytes!("../../../../dist/assets/index-RHt3u671.css");
-const DIST_JS: &[u8] = include_bytes!("../../../../dist/assets/index-BsPZHSTR.js");
+static DIST_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../../dist");
+
+static LAST_HEARTBEAT: AtomicI64 = AtomicI64::new(0);
 
 const IPC_SHIM_SCRIPT: &str = r#"<script>
-window.__TAURI_INTERNALS__ = {
-  invoke: async function(cmd, args) {
-    const res = await fetch('/__noesis_ipc__', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cmd: cmd, args: args || {} })
-    });
-    const payload = await res.json();
-    if (!res.ok || payload.error) {
-      throw new Error(payload.error || 'Noesis IPC Error');
-    }
-    return payload.result;
-  },
-  transformCallback: function(callback, once) {
-    const id = window._cb_id = (window._cb_id || 1) + 1;
-    window['_' + id] = (res) => {
-      callback(res);
-      if (once) delete window['_' + id];
+(function() {
+  const channels = new Map();
+
+  function ensureChannel(channelId, onEventCallback) {
+    if (!channelId || channels.has(channelId)) return;
+    const es = new EventSource('/__noesis_events__?channel=' + encodeURIComponent(channelId));
+    channels.set(channelId, es);
+    es.onmessage = function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        if (typeof onEventCallback === 'function') {
+          onEventCallback(data);
+        }
+      } catch (err) {
+        console.error('SSE JSON parse error:', err);
+      }
     };
-    return id;
-  },
-  unregisterCallback: function(id) {
-    delete window['_' + id];
-  },
-  metadata: {
-    currentWindow: { label: 'main' },
-    currentWebview: { label: 'main', windowLabel: 'main' }
+    es.onerror = function() {
+      es.close();
+      channels.delete(channelId);
+    };
   }
-};
+
+  // Intercept Channel constructors if instantiated
+  if (typeof window !== 'undefined') {
+    setInterval(() => {
+      fetch('/__noesis_heartbeat__').catch(() => {});
+    }, 10000);
+  }
+
+  window.__TAURI_INTERNALS__ = {
+    invoke: async function(cmd, args) {
+      let channelId = null;
+      let onEventCb = null;
+      if (args && args.onEvent) {
+        if (typeof args.onEvent.onmessage === 'function') {
+          onEventCb = (data) => args.onEvent.onmessage(data);
+          channelId = args.onEvent.__tauri_channel_id__ || ('ch_' + Math.random().toString(36).substring(2, 9));
+          args.onEvent.__tauri_channel_id__ = channelId;
+        } else if (args.onEvent.__tauri_channel_id__) {
+          channelId = String(args.onEvent.__tauri_channel_id__);
+        }
+      } else if (args && args.on_event) {
+        if (typeof args.on_event.onmessage === 'function') {
+          onEventCb = (data) => args.on_event.onmessage(data);
+          channelId = args.on_event.__tauri_channel_id__ || ('ch_' + Math.random().toString(36).substring(2, 9));
+          args.on_event.__tauri_channel_id__ = channelId;
+        } else if (args.on_event.__tauri_channel_id__) {
+          channelId = String(args.on_event.__tauri_channel_id__);
+        }
+      }
+
+      if (channelId && onEventCb) {
+        ensureChannel(channelId, onEventCb);
+      }
+
+      const q = channelId ? '?channel=' + encodeURIComponent(channelId) : '';
+      const res = await fetch('/__noesis_ipc__' + q, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: cmd, args: args || {} })
+      });
+      const payload = await res.json();
+      if (!res.ok || payload.error) {
+        throw new Error(payload.error || 'Noesis IPC Error');
+      }
+      return payload.result;
+    },
+    transformCallback: function(callback, once) {
+      const id = window._cb_id = (window._cb_id || 1) + 1;
+      window['_' + id] = (res) => {
+        callback(res);
+        if (once) delete window['_' + id];
+      };
+      return id;
+    },
+    unregisterCallback: function(id) {
+      delete window['_' + id];
+    },
+    metadata: {
+      currentWindow: { label: 'main' },
+      currentWebview: { label: 'main', windowLabel: 'main' }
+    }
+  };
+})();
 </script>"#;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemStatus {
-    pub db_degraded: bool,
-    pub db_error: Option<String>,
+struct SseEventSink {
+    tx: broadcast::Sender<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructuredExplainResponse {
-    pub explanation: Option<StructuredExplanation>,
-    pub verification: VerificationSummary,
-    pub manifest: ContextManifest,
-    pub dropped: Vec<DroppedItem>,
-    pub cached: bool,
-    pub raw_unverified_output: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitExerciseResult {
-    pub is_correct: bool,
-    pub quality: u8,
-    pub review: Sm2ReviewState,
-    pub reference_answer: String,
-    pub verified_by_program: bool,
-}
-
-pub struct AppState {
-    pub project_manager: Mutex<Option<ProjectManager>>,
-    pub project_map: Mutex<Option<ProjectMap>>,
-    pub store: DbStore,
-    pub db_degraded: bool,
-    pub db_error: Option<String>,
-    pub credentials: CredentialStore,
-    pub llm: LlmGateway,
-    pub indexer: CodeIndexer,
-    pub knowledge_base: KnowledgeBase,
-    pub lsp: LspManager,
-    pub cancellations: CancellationRegistry,
-}
-
-#[derive(Deserialize)]
-struct IpcEnvelope {
-    cmd: String,
-    #[serde(default)]
-    args: Value,
-}
-
-fn select_linux_directory() -> Option<String> {
-    if let Ok(out) = Command::new("zenity")
-        .args(["--file-selection", "--directory", "--title=选择要分析的代码仓库根目录"])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    }
-    if let Ok(out) = Command::new("kdialog")
-        .args(["--getexistingdirectory", "."])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-async fn dispatch_command(state: &AppState, cmd: &str, args: Value) -> Result<Value, String> {
-    match cmd {
-        "plugin:dialog|open" => {
-            if let Some(dir) = select_linux_directory() {
-                Ok(Value::String(dir))
-            } else {
-                Err("No native dialog utility (zenity/kdialog) selected a directory".to_string())
-            }
-        }
-        "get_system_status" => Ok(serde_json::to_value(SystemStatus {
-            db_degraded: state.db_degraded,
-            db_error: state.db_error.clone(),
-        })
-        .unwrap()),
-        "get_expert_system_prompt" => Ok(Value::String(EXPERT_SYSTEM_PROMPT.to_string())),
-        "get_llm_config" => Ok(serde_json::to_value(state.credentials.get_config_view()).unwrap()),
-        "set_llm_config" => {
-            let cfg: LlmConfig = serde_json::from_value(args["config"].clone())
-                .map_err(|e| e.to_string())?;
-            let res = state.credentials.update_config(cfg).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "set_api_key" => {
-            let key = args["apiKey"]
-                .as_str()
-                .or_else(|| args["api_key"].as_str())
-                .unwrap_or_default();
-            let res = state.credentials.set_api_key(key).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "clear_api_key" => {
-            let res = state.credentials.clear_api_key().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "test_llm_connection" => {
-            let cfg: LlmConfig = serde_json::from_value(args["config"].clone())
-                .map_err(|e| e.to_string())?;
-            let effective = state.credentials.resolve_effective_config(&cfg);
-            let res = state.llm.test_connection(&effective).await;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "cancel_llm_request" => {
-            let req_id = args["requestId"]
-                .as_str()
-                .or_else(|| args["request_id"].as_str())
-                .unwrap_or_default();
-            Ok(Value::Bool(state.cancellations.cancel(req_id)))
-        }
-        "open_project" => {
-            let path = args["path"].as_str().unwrap_or("./");
-            let pm = ProjectManager::new(path).map_err(|e| e.to_string())?;
-            let tree = pm.build_tree(2).map_err(|e| e.to_string())?;
-            let mut guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            *guard = Some(pm);
-            Ok(serde_json::to_value(tree).unwrap())
-        }
-        "list_project_dir" => {
-            let rel_dir = args["relDir"]
-                .as_str()
-                .or_else(|| args["rel_dir"].as_str())
-                .unwrap_or_default();
-            let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            let pm = pm_guard.as_ref().ok_or("尚未打开任何工程")?;
-            let list = pm.list_dir(rel_dir).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(list).unwrap())
-        }
-        "get_project_tree" => {
-            let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            if let Some(pm) = pm_guard.as_ref() {
-                let tree = pm.build_tree(6).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_value(Some(tree)).unwrap())
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        "read_file" => {
-            let path = args["path"].as_str().unwrap_or_default();
-            let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            let pm = pm_guard
-                .as_ref()
-                .ok_or("尚未打开任何工程，请先在左侧选择工程目录。")?;
-            let payload = pm.read_file(path).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(payload).unwrap())
-        }
-        "save_file" => {
-            let path = args["path"].as_str().unwrap_or_default();
-            let content = args["content"].as_str().unwrap_or_default();
-            let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            let pm = pm_guard
-                .as_ref()
-                .ok_or("尚未打开任何工程，无法保存文件。")?;
-            let hash = pm.save_file(path, content).map_err(|e| e.to_string())?;
-            Ok(Value::String(hash))
-        }
-        "index_project" => {
-            let (root_path, project_id) = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
-                (pm.root_path().to_path_buf(), pm.normalized_root())
-            };
-            let _ = state.store.ensure_schema();
-            let ros2_adapter = Ros2Adapter::new();
-            let llm_adapter = LlmAppAdapter::new();
-            let adapters: [&dyn DomainAdapter; 2] = [&ros2_adapter, &llm_adapter];
-            let (map, _report) = state
-                .indexer
-                .index_workspace(&root_path, &state.store, &adapters)
-                .map_err(|e| e.to_string())?;
-            refresh_project_exercises_freshness(&root_path, &state.store, &project_id);
-            let mut map_guard = state.project_map.lock().map_err(|e| e.to_string())?;
-            *map_guard = Some(map.clone());
-            Ok(serde_json::to_value(map).unwrap())
-        }
-        "get_project_map" => {
-            let map = state.project_map.lock().map_err(|e| e.to_string())?.clone();
-            Ok(serde_json::to_value(map).unwrap())
-        }
-        "set_reading_step_status" => {
-            let step_id = args["stepId"]
-                .as_str()
-                .or_else(|| args["step_id"].as_str())
-                .unwrap_or_default();
-            let status = args["status"].as_str().unwrap_or("unread");
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
-                pm.normalized_root()
-            };
-            state
-                .store
-                .set_reading_progress(&project_id, step_id, status)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
-        "get_reading_progress" => {
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
-                pm.normalized_root()
-            };
-            let res = state
-                .store
-                .get_reading_progress(&project_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "get_symbol_neighborhood" => {
-            let symbol_id = args["symbolId"]
-                .as_str()
-                .or_else(|| args["symbol_id"].as_str())
-                .unwrap_or_default();
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
-                pm.normalized_root()
-            };
-            let res = state
-                .store
-                .get_symbol_with_neighbors(&project_id, symbol_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "list_project_symbols" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str());
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                let pm = pm_guard.as_ref().ok_or("No project opened yet")?;
-                pm.normalized_root()
-            };
-            let res = state
-                .store
-                .list_project_symbols(&project_id, file_path)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "explain_code" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str())
-                .unwrap_or_default();
-            let snippet = args["snippet"].as_str().unwrap_or_default();
-            let start_line = args["startLine"]
-                .as_u64()
-                .or_else(|| args["start_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let end_line = args["endLine"]
-                .as_u64()
-                .or_else(|| args["end_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-            let source_matches = if let Some(pm) = pm_guard.as_ref() {
-                if let Ok(payload) = pm.read_file(file_path) {
-                    LearnEngine::verify_source_reference(
-                        &payload.content,
-                        start_line,
-                        end_line,
-                        snippet,
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            let cards = LearnEngine::generate_structured_cards(
-                file_path,
-                snippet,
-                start_line,
-                end_line,
-                source_matches,
-            );
-            Ok(serde_json::to_value(cards).unwrap())
-        }
-        "explain_selection_structured" => {
-            let config: LlmConfig = serde_json::from_value(args["config"].clone())
-                .map_err(|e| e.to_string())?;
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            let snippet = args["snippet"].as_str().unwrap_or_default().to_string();
-            let start_line = args["startLine"]
-                .as_u64()
-                .or_else(|| args["start_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let end_line = args["endLine"]
-                .as_u64()
-                .or_else(|| args["end_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let force_refresh = args["forceRefresh"]
-                .as_bool()
-                .or_else(|| args["force_refresh"].as_bool())
-                .unwrap_or(false);
-            let depth_mode = args["depthMode"]
-                .as_str()
-                .or_else(|| args["depth_mode"].as_str())
-                .map(|s| s.to_string());
-
-            let (root_path, project_id) = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                if let Some(pm) = pm_guard.as_ref() {
-                    (pm.root_path().to_path_buf(), pm.normalized_root())
-                } else {
-                    (PathBuf::from("."), "default".to_string())
-                }
-            };
-            let mut effective = state.credentials.resolve_effective_config(&config);
-            if depth_mode.as_deref() == Some("deep") {
-                effective.max_tokens = effective.max_tokens.max(8192);
-            }
-            let active_preset = state.store.get_active_prompt_preset("explain").ok().flatten();
-            let custom_persona = active_preset.map(|p| p.persona_text);
-            let budget_tokens = if depth_mode.as_deref() == Some("deep") { 24000 } else { 16000 };
-            let estimator = HeuristicTokenEstimator;
-            let ctx_req = ContextRequest {
-                kind: "explain_selection".to_string(),
-                project_id: project_id.clone(),
-                file: Some(file_path.clone()),
-                range: Some((start_line, end_line)),
-                selected_code: Some(snippet.clone()),
-                question: None,
-                entity_ref: None,
-                conversation_id: None,
-                budget_tokens,
-                include_learning_profile: true,
-                re_explain_type: None,
-                re_explain_level: None,
-                previous_explanation_summary: None,
-                user_note: None,
-                depth_mode: depth_mode.clone(),
-                custom_persona,
-            };
-            let pack = ContextAssembler::assemble(
-                &root_path,
-                Some(&state.store),
-                Some(&state.knowledge_base),
-                &ctx_req,
-                &estimator,
-                &effective.model,
-            );
-            if !force_refresh {
-                if let Ok(Some(cached)) = state.store.get_cached_explanation(
-                    &pack.basis_hash,
-                    &effective.model,
-                    PROMPT_VERSION,
-                ) {
-                    if let Ok(mut exp) = serde_json::from_str::<StructuredExplanation>(&cached.json)
-                    {
-                        let verification = CitationVerifier::verify(
-                            &root_path,
-                            &pack.manifest.loaded_knowledge_packs,
-                            &mut exp,
-                        );
-                        return Ok(serde_json::to_value(StructuredExplainResponse {
-                            explanation: Some(exp),
-                            verification,
-                            manifest: pack.manifest,
-                            dropped: pack.dropped,
-                            cached: true,
-                            raw_unverified_output: None,
-                        })
-                        .unwrap());
-                    }
-                }
-            }
-            let combined_prompt = pack
-                .items
-                .iter()
-                .map(|i| i.text.clone())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let messages = vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: EXPERT_SYSTEM_PROMPT.to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: combined_prompt,
-                },
-            ];
-            let raw_reply = state
-                .llm
-                .send_chat(&effective, messages)
-                .await
-                .map_err(|e| e.to_string())?;
-            match extract_and_parse_explanation_json(&raw_reply) {
-                Ok(mut exp) => {
-                    let verification = CitationVerifier::verify(
-                        &root_path,
-                        &pack.manifest.loaded_knowledge_packs,
-                        &mut exp,
-                    );
-                    if let Ok(json_str) = serde_json::to_string(&exp) {
-                        let stats_str = serde_json::to_string(&verification).unwrap_or_default();
-                        let title_text = exp.overall.one_sentence.chars().take(40).collect::<String>();
-                        let title = if title_text.trim().is_empty() {
-                            let fn_name = file_path.split('/').next_back().unwrap_or(&file_path);
-                            format!("{}:{}-{}", fn_name, start_line, end_line)
-                        } else {
-                            title_text
-                        };
-                        let preview = snippet.chars().take(200).collect::<String>();
-                        let exp_id = format!(
-                            "exp-{}-{}",
-                            chrono::Utc::now().timestamp_millis(),
-                            &pack.basis_hash[..8.min(pack.basis_hash.len())]
-                        );
-                        let _ = state.store.save_explanation_cache(&CachedExplanation {
-                            id: exp_id,
-                            project_id,
-                            file_id: file_path.clone(),
-                            range: format!("{}-{}", start_line, end_line),
-                            basis_hash: pack.basis_hash,
-                            prompt_version: PROMPT_VERSION.to_string(),
-                            model: effective.model.clone(),
-                            request_kind: "explain_selection".to_string(),
-                            json: json_str,
-                            stats: stats_str,
-                            created_at: chrono::Utc::now().timestamp(),
-                            title: Some(title),
-                            file_path: Some(file_path.clone()),
-                            selected_preview: Some(preview),
-                            pinned: false,
-                            deleted: false,
-                            depth_mode: depth_mode.clone(),
-                            last_opened_at: Some(chrono::Utc::now().timestamp()),
-                        });
-                    }
-                    Ok(serde_json::to_value(StructuredExplainResponse {
-                        explanation: Some(exp),
-                        verification,
-                        manifest: pack.manifest,
-                        dropped: pack.dropped,
-                        cached: false,
-                        raw_unverified_output: None,
-                    })
-                    .unwrap())
-                }
-                Err(_) => Ok(serde_json::to_value(StructuredExplainResponse {
-                    explanation: None,
-                    verification: VerificationSummary::default(),
-                    manifest: pack.manifest,
-                    dropped: pack.dropped,
-                    cached: false,
-                    raw_unverified_output: Some(raw_reply),
-                })
-                .unwrap()),
-            }
-        }
-        "mark_confusion" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            let start_line = args["startLine"]
-                .as_u64()
-                .or_else(|| args["start_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let end_line = args["endLine"]
-                .as_u64()
-                .or_else(|| args["end_line"].as_u64())
-                .unwrap_or(1) as u32;
-            let snippet = args["snippet"].as_str().unwrap_or_default().to_string();
-            let category = args["category"].as_str().unwrap_or("logic").to_string();
-            let user_note = args["userNote"]
-                .as_str()
-                .or_else(|| args["user_note"].as_str())
-                .map(|s| s.to_string());
-            let mut rewording = LearnEngine::handle_confusion_mark(&category, &snippet);
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard.as_ref().map(|pm| pm.normalized_root())
-            };
-            let mark_id = format!(
-                "mark-{}-{}",
-                chrono::Utc::now().timestamp_millis(),
-                start_line
-            );
-            rewording.mark_id = Some(mark_id.clone());
-            let mark = ConfusionMark {
-                id: mark_id,
-                project_id,
-                file_path,
-                line_start: start_line,
-                line_end: end_line,
-                code_snippet: snippet,
-                category: category.clone(),
-                confusion_type: Some(category),
-                explanation: Some(rewording.analogy.clone()),
-                ai_explanation: None,
-                model: None,
-                level: 1,
-                resolved_at: None,
-                resolved_level: None,
-                user_note,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                review_exercise_id: None,
-                concepts_json: None,
-            };
-            let _ = state.store.save_mark(&mark);
-            Ok(serde_json::to_value(rewording).unwrap())
-        }
-        "update_confusion_mark_explanation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let ai_exp = args["aiExplanation"]
-                .as_str()
-                .or_else(|| args["ai_explanation"].as_str())
-                .unwrap_or_default();
-            let model = args["model"].as_str().unwrap_or_default();
-            state
-                .store
-                .update_mark_ai_explanation(id, ai_exp, model)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
-        "resolve_confusion_mark" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let level = args["level"].as_i64().unwrap_or(1) as i32;
-            let resolved = args["resolved"].as_bool().unwrap_or(true);
-            state
-                .store
-                .update_mark_level_and_resolution(id, level, resolved)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
-        "get_confusion_marks" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str());
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard.as_ref().map(|pm| pm.normalized_root())
-            };
-            let marks = state
-                .store
-                .list_marks(file_path, project_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(marks).unwrap())
-        }
-        "get_learning_profile" => {
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard.as_ref().map(|pm| pm.normalized_root())
-            };
-            let items = state
-                .store
-                .list_concept_profile(project_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(items).unwrap())
-        }
-        "list_conversations" => {
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard.as_ref().map(|pm| pm.normalized_root())
-            };
-            let list = state
-                .store
-                .list_conversations(project_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(list).unwrap())
-        }
-        "create_conversation" => {
-            let title = args["title"].as_str().unwrap_or("新对话");
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_else(|| "default".to_string())
-            };
-            let id = format!("conv-{}", chrono::Utc::now().timestamp_millis());
-            let rec = state
-                .store
-                .create_conversation(&id, &project_id, title)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(rec).unwrap())
-        }
-        "load_conversation_messages" => {
-            let conv_id = args["conversationId"]
-                .as_str()
-                .or_else(|| args["conversation_id"].as_str())
-                .unwrap_or_default();
-            let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-            let msgs = state
-                .store
-                .list_messages(conv_id, limit)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(msgs).unwrap())
-        }
-        "append_conversation_message" => {
-            let conv_id = args["conversationId"]
-                .as_str()
-                .or_else(|| args["conversation_id"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            let role = args["role"].as_str().unwrap_or("user").to_string();
-            let content = args["content"].as_str().unwrap_or_default().to_string();
-            let meta_json = args["metaJson"]
-                .as_str()
-                .or_else(|| args["meta_json"].as_str())
-                .unwrap_or("{}")
-                .to_string();
-            let est = HeuristicTokenEstimator;
-            let tokens = noesis_learn::context::TokenEstimator::estimate(&est, &content);
-            let msg = StoredMessageRecord {
-                id: format!("msg-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
-                conversation_id: conv_id,
-                role,
-                content,
-                meta_json,
-                tokens,
-                created_at: chrono::Utc::now().timestamp(),
-            };
-            state
-                .store
-                .append_message(&msg)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(msg).unwrap())
-        }
-        "delete_conversation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            state
-                .store
-                .delete_conversation(id)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
-        "preview_outbound" => {
-            let cfg: LlmConfig = serde_json::from_value(args["config"].clone())
-                .map_err(|e| e.to_string())?;
-            let messages: Vec<ChatMessage> = serde_json::from_value(args["messages"].clone())
-                .map_err(|e| e.to_string())?;
-            let effective = state.credentials.resolve_effective_config(&cfg);
-            let prev = state
-                .llm
-                .filter()
-                .inspect_outbound(&effective, &messages)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(prev).unwrap())
-        }
-        "send_llm_chat" => {
-            let cfg: LlmConfig = serde_json::from_value(args["config"].clone())
-                .map_err(|e| e.to_string())?;
-            let messages: Vec<ChatMessage> = serde_json::from_value(args["messages"].clone())
-                .map_err(|e| e.to_string())?;
-            let effective = state.credentials.resolve_effective_config(&cfg);
-            let reply = state
-                .llm
-                .send_chat(&effective, messages)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Value::String(reply))
-        }
-        "run_scratch_code" => {
-            let req: RunRequest = serde_json::from_value(args["req"].clone())
-                .map_err(|e| e.to_string())?;
-            let res = CodeRunner::execute(req).await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "generate_project_exercises" => {
-            let count = args["count"].as_u64().unwrap_or(5) as usize;
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str());
-            let snippet = args["snippet"].as_str();
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_else(|| "default".to_string())
-            };
-            let entities = state
-                .store
-                .get_entities_by_domain(&project_id, None, None)
-                .unwrap_or_default();
-            let edges = state
-                .store
-                .get_edges_filtered(&project_id, None)
-                .unwrap_or_default();
-            let symbols = state
-                .store
-                .list_project_symbols(&project_id, None)
-                .unwrap_or_default();
-            let mut generated =
-                generate_fact_exercises(&project_id, &entities, &edges, &symbols, count);
-            if let (Some(fp), Some(code)) = (file_path, snippet) {
-                if let Some(cloze) = generate_cloze_exercise(&project_id, fp, code, None) {
-                    generated.push(cloze);
-                }
-            }
-            for ex in &generated {
-                let _ = state.store.insert_exercise(ex);
-            }
-            Ok(serde_json::to_value(generated).unwrap())
-        }
-        "submit_exercise_answer" => {
-            let exercise_id = args["exerciseId"]
-                .as_str()
-                .or_else(|| args["exercise_id"].as_str())
-                .unwrap_or_default();
-            let answer = args["answer"].as_str().unwrap_or_default();
-            let hesitation = args["hesitation"].as_str();
-            let due = state.store.list_due_exercises().map_err(|e| e.to_string())?;
-            let Some(mut ex) = due.into_iter().find(|e| e.id == exercise_id) else {
-                return Err(format!("未找到练习题 '{}'", exercise_id));
-            };
-            let is_correct = grade_deterministic_answer(answer, &ex.reference_answer);
-            let quality = map_answer_to_quality(&ex.source_kind, is_correct, hesitation, None);
-            let review =
-                compute_sm2_review(quality, ex.ease, ex.interval_days, ex.repetition, ex.lapses);
-            ex.ease = review.ease;
-            ex.interval_days = review.interval_days;
-            ex.repetition = review.repetitions;
-            ex.lapses = review.lapses;
-            ex.next_review_at = review.next_review_at.clone();
-            state.store.insert_exercise(&ex).map_err(|e| e.to_string())?;
-            let _ = state.store.record_exercise_attempt(
-                &ex.id,
-                answer,
-                if is_correct { "correct" } else { "wrong" },
-                if is_correct { 1.0 } else { 0.0 },
-            );
-            Ok(serde_json::to_value(SubmitExerciseResult {
-                is_correct,
-                quality,
-                review,
-                reference_answer: ex.reference_answer,
-                verified_by_program: ex.verified_by_program,
-            })
-            .unwrap())
-        }
-        "list_due_reviews" => {
-            let res = state.store.list_due_exercises().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "detect_lsp_servers" => Ok(serde_json::to_value(state.lsp.detect_servers()).unwrap()),
-        "lsp_find_definition" => {
-            let sym = args["symbolName"]
-                .as_str()
-                .or_else(|| args["symbol_name"].as_str())
-                .unwrap_or_default();
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_default()
-            };
-            Ok(serde_json::to_value(state.lsp.resolve_definition(
-                Some(&state.store),
-                &project_id,
-                sym,
-            ))
-            .unwrap())
-        }
-        "lsp_find_references" => {
-            let sym = args["symbolName"]
-                .as_str()
-                .or_else(|| args["symbol_name"].as_str())
-                .unwrap_or_default();
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_default()
-            };
-            Ok(serde_json::to_value(state.lsp.resolve_references(
-                Some(&state.store),
-                &project_id,
-                sym,
-            ))
-            .unwrap())
-        }
-        "lsp_get_hover" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .or_else(|| args["file_path"].as_str())
-                .unwrap_or_default();
-            let line = args["line"].as_u64().unwrap_or(1) as u32;
-            let word = args["word"].as_str().unwrap_or_default();
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_default()
-            };
-            Ok(serde_json::to_value(state.lsp.get_hover_from_store(
-                Some(&state.store),
-                &project_id,
-                file_path,
-                line,
-                word,
-            ))
-            .unwrap())
-        }
-        "list_explanations" => {
-            let project_id = {
-                let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-                pm_guard
-                    .as_ref()
-                    .map(|pm| pm.normalized_root())
-                    .unwrap_or_else(|| "default".to_string())
-            };
-            let fp = args["filePath"].as_str().or_else(|| args["file_path"].as_str());
-            let q = args["query"].as_str();
-            let pinned = args["pinnedOnly"].as_bool().or_else(|| args["pinned_only"].as_bool()).unwrap_or(false);
-            let limit = args["limit"].as_u64().unwrap_or(20) as usize;
-            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            let list = state.store.list_explanations(&project_id, fp, q, pinned, limit, offset).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(list).unwrap())
-        }
-        "get_explanation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let exp = state.store.get_explanation(id).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(exp).unwrap())
-        }
-        "rename_explanation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let title = args["newTitle"].as_str().or_else(|| args["new_title"].as_str()).unwrap_or_default();
-            state.store.rename_explanation(id, title).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "pin_explanation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let pinned = args["pinned"].as_bool().unwrap_or(true);
-            state.store.pin_explanation(id, pinned).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "delete_explanation" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            state.store.delete_explanation(id).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "list_prompt_presets" => {
-            let scope = args["scope"].as_str();
-            let list = state.store.list_prompt_presets(scope).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(list).unwrap())
-        }
-        "save_prompt_preset" => {
-            let preset: PromptPreset = serde_json::from_value(args["preset"].clone()).map_err(|e| e.to_string())?;
-            state.store.save_prompt_preset(&preset).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "set_active_prompt_preset" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let scope = args["scope"].as_str().unwrap_or("explain");
-            state.store.set_active_prompt_preset(id, scope).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "delete_prompt_preset" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            state.store.delete_prompt_preset(id).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "reset_prompt_to_default" => {
-            let scope = args["scope"].as_str().unwrap_or("explain");
-            state.store.reset_prompt_to_default(scope).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "preview_effective_prompt" => {
-            let scope = args["scope"].as_str().unwrap_or("explain").to_string();
-            let active = state.store.get_active_prompt_preset(&scope).ok().flatten();
-            let (name, persona) = if let Some(p) = active {
-                (p.name, p.persona_text)
-            } else {
-                ("内置默认".to_string(), DEFAULT_PERSONA_PROMPT.to_string())
-            };
-            let locked = LOCKED_RULES_PROMPT.to_string();
-            let full = format!("{}\n\n---\n\n{}", persona, locked);
-            let est = HeuristicTokenEstimator;
-            let tokens = noesis_learn::context::TokenEstimator::estimate(&est, &full);
-            Ok(json!({
-                "scope": scope,
-                "preset_name": name,
-                "l1_persona": persona,
-                "l0_locked": locked,
-                "full_prompt": full,
-                "token_estimate": tokens
-            }))
-        }
-        "get_confusion_detail" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            let res = state.store.get_confusion_detail(id).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(res).unwrap())
-        }
-        "reopen_confusion_mark" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            state.store.reopen_confusion_mark(id).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "delete_confusion_mark" => {
-            let id = args["id"].as_str().unwrap_or_default();
-            state.store.delete_confusion_mark(id).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "submit_explanation_feedback" => {
-            let explanation_id = args["explanationId"].as_str().or_else(|| args["explanation_id"].as_str()).unwrap_or_default().to_string();
-            let card_perspective = args["cardPerspective"].as_str().or_else(|| args["card_perspective"].as_str()).unwrap_or_default().to_string();
-            let feedback = args["feedback"].as_str().unwrap_or_default().to_string();
-            let note = args["note"].as_str().map(|s| s.to_string());
-            let fb = ExplanationFeedback {
-                id: format!("fb-{}", chrono::Utc::now().timestamp_millis()),
-                explanation_id,
-                card_perspective,
-                feedback,
-                note,
-                prompt_version: Some(PROMPT_VERSION.to_string()),
-                model: None,
-                created_at: chrono::Utc::now().timestamp(),
-            };
-            state.store.record_explanation_feedback(&fb).map_err(|e| e.to_string())?;
-            Ok(Value::Bool(true))
-        }
-        "get_feedback_stats" => {
-            let pv = args["promptVersion"].as_str().or_else(|| args["prompt_version"].as_str());
-            let m = args["model"].as_str();
-            let stats = state.store.get_feedback_stats(pv, m).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(stats).unwrap())
-        }
-        other => Err(format!("Unsupported IPC command: {}", other)),
+impl EventSink for SseEventSink {
+    fn send_event(&self, event: Value) -> Result<(), String> {
+        let msg = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        let _ = self.tx.send(msg);
+        Ok(())
     }
 }
 
-async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>) {
-    let mut buf = vec![0u8; 65536];
-    let mut total_read = 0usize;
-    loop {
-        match stream.read(&mut buf[total_read..]).await {
-            Ok(0) => break,
-            Ok(n) => {
-                total_read += n;
-                if let Some(header_end) = buf[..total_read]
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                {
-                    let headers_str = String::from_utf8_lossy(&buf[..header_end]);
-                    let content_len = headers_str
-                        .lines()
-                        .find_map(|l| {
-                            let lower = l.to_ascii_lowercase();
-                            if lower.starts_with("content-length:") {
-                                l.split(':').nth(1)?.trim().parse::<usize>().ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0);
-                    let body_start = header_end + 4;
-                    let expected_total = body_start + content_len;
-                    if total_read < expected_total {
-                        if buf.len() < expected_total {
-                            buf.resize(expected_total, 0);
-                        }
-                        if stream
-                            .read_exact(&mut buf[total_read..expected_total])
-                            .await
-                            .is_ok()
-                        {
-                            total_read = expected_total;
-                        }
-                    }
-                    break;
-                }
-                if total_read == buf.len() {
-                    buf.resize(buf.len() * 2, 0);
-                }
-            }
-            Err(_) => return,
+type ChannelMap = Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>;
+
+fn get_or_create_channel(channels: &ChannelMap, id: &str) -> broadcast::Sender<String> {
+    let mut guard = channels.lock().unwrap();
+    if let Some(tx) = guard.get(id) {
+        tx.clone()
+    } else {
+        let (tx, _) = broadcast::channel(128);
+        guard.insert(id.to_string(), tx.clone());
+        tx
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Single Instance File Lock (G1)
+    let lock_dir = dirs::runtime_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("noesis");
+    let _ = std::fs::create_dir_all(&lock_dir);
+    let lock_path = lock_dir.join("noesis.lock");
+
+    let mut lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    if lock_file.try_lock_exclusive().is_err() {
+        let mut existing_url = String::new();
+        let _ = lock_file.read_to_string(&mut existing_url);
+        let trimmed = existing_url.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            println!("Noesis 实例已在运行：{}", trimmed);
+            let _ = Command::new("xdg-open").arg(trimmed).spawn();
+        } else {
+            eprintln!("Noesis 另一个实例正在运行中。");
         }
+        return Ok(());
     }
 
-    if total_read == 0 {
-        return;
-    }
+    // 2. Initialize AppState
+    let app_data = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("noesis");
+    let _ = std::fs::create_dir_all(&app_data);
+    let state = Arc::new(AppState::new(app_data));
+    let channels: ChannelMap = Arc::new(Mutex::new(HashMap::new()));
 
-    let Some(header_end) = buf[..total_read]
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-    else {
-        return;
+    // 3. Bind TCP Listener
+    let listener = match TcpListener::bind("127.0.0.1:54321").await {
+        Ok(l) => l,
+        Err(_) => TcpListener::bind("127.0.0.1:0").await?,
     };
-    let req_line = String::from_utf8_lossy(&buf[..header_end])
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    let parts: Vec<&str> = req_line.split_whitespace().collect();
+    let addr = listener.local_addr()?;
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    // Record URL in lock file
+    let _ = lock_file.set_len(0);
+    let _ = lock_file.seek(SeekFrom::Start(0));
+    let _ = lock_file.write_all(url.as_bytes());
+    let _ = lock_file.flush();
+
+    println!("NOESIS v0.1.2 (Linux x86_64) running at {}", url);
+
+    // 4. Heartbeat Lifecycle (G1)
+    LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            let last = LAST_HEARTBEAT.load(Ordering::SeqCst);
+            let now = chrono::Utc::now().timestamp();
+            if now - last > 30 {
+                let active = ACTIVE_TASKS.load(Ordering::SeqCst);
+                let indexing = IS_INDEXING.load(Ordering::SeqCst);
+                if active == 0 && !indexing {
+                    println!("Noesis 30秒无心跳且无后台活动任务，安全退出进程。");
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
+
+    // 5. Open browser if not headless
+    if std::env::var("NOESIS_HEADLESS").is_err() {
+        let u = url.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+            let _ = Command::new("xdg-open").arg(&u).spawn();
+        });
+    }
+
+    // Keep lock_file alive for the lifetime of the process
+    let _lock_file_keeper = lock_file;
+
+    // 6. Request loop
+    loop {
+        if let Ok((stream, _)) = listener.accept().await {
+            let st = Arc::clone(&state);
+            let ch = Arc::clone(&channels);
+            tokio::spawn(async move {
+                handle_http_connection(stream, st, ch).await;
+            });
+        }
+    }
+}
+
+async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, channels: ChannelMap) {
+    let mut buffer = vec![0u8; 8192];
+    let bytes_read = match stream.read(&mut buffer).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+
+    let req_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let mut lines = req_str.lines();
+    let request_line = match lines.next() {
+        Some(l) => l,
+        None => return,
+    };
+
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return;
     }
     let method = parts[0];
-    let path = parts[1];
-    let body = &buf[header_end + 4..total_read];
+    let path_with_query = parts[1];
 
-    if method == "POST" && path == "/__noesis_ipc__" {
-        let resp_json = match serde_json::from_slice::<IpcEnvelope>(body) {
-            Ok(env) => match dispatch_command(&state, &env.cmd, env.args).await {
-                Ok(val) => json!({ "result": val }),
-                Err(err) => json!({ "error": err }),
-            },
-            Err(e) => json!({ "error": format!("Invalid IPC JSON: {}", e) }),
-        };
-        let body_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
-        let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body_bytes.len()
-        );
-        let _ = stream.write_all(header.as_bytes()).await;
-        let _ = stream.write_all(&body_bytes).await;
+    let mut path_parts = path_with_query.splitn(2, '?');
+    let path = path_parts.next().unwrap_or("/");
+    let query = path_parts.next().unwrap_or("");
+
+    // 1. Heartbeat
+    if path == "/__noesis_heartbeat__" {
+        LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
+        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\n\r\nok";
+        let _ = stream.write_all(resp.as_bytes()).await;
         return;
     }
 
-    let (content_type, body_bytes): (&str, Vec<u8>) = if path.ends_with(".css") {
-        ("text/css; charset=utf-8", DIST_CSS.to_vec())
-    } else if path.ends_with(".js") {
-        ("application/javascript; charset=utf-8", DIST_JS.to_vec())
-    } else {
-        let injected = DIST_INDEX_HTML.replace("<head>", &format!("<head>\n{}", IPC_SHIM_SCRIPT));
-        ("text/html; charset=utf-8", injected.into_bytes())
-    };
+    // 2. SSE Event Stream
+    if path == "/__noesis_events__" {
+        LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
+        let mut channel_id = "default".to_string();
+        for param in query.split('&') {
+            let mut pair = param.splitn(2, '=');
+            if pair.next() == Some("channel") {
+                if let Some(val) = pair.next() {
+                    channel_id = val.to_string();
+                }
+            }
+        }
 
-    let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        content_type,
-        body_bytes.len()
-    );
-    let _ = stream.write_all(header.as_bytes()).await;
-    let _ = stream.write_all(&body_bytes).await;
-}
+        let tx = get_or_create_channel(&channels, &channel_id);
+        let mut rx = tx.subscribe();
 
-fn launch_linux_window(url: &str) {
-    let app_arg = format!("--app={}", url);
-    for browser in [
-        "google-chrome",
-        "chromium",
-        "chromium-browser",
-        "microsoft-edge",
-        "brave-browser",
-    ] {
-        if Command::new(browser)
-            .args([&app_arg, "--window-size=1280,840"])
-            .spawn()
-            .is_ok()
-        {
+        let sse_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+        if stream.write_all(sse_headers.as_bytes()).await.is_err() {
+            return;
+        }
+
+        while let Ok(msg) = rx.recv().await {
+            let sse_msg = format!("data: {}\n\n", msg);
+            if stream.write_all(sse_msg.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+        return;
+    }
+
+    // 3. IPC Command Dispatch
+    if path == "/__noesis_ipc__" {
+        LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
+        let mut body = String::new();
+        if let Some(pos) = req_str.find("\r\n\r\n") {
+            body.push_str(&req_str[pos + 4..]);
+        }
+
+        // Read more if Content-Length exceeds what was read
+        let mut content_length: usize = 0;
+        for line in req_str.lines() {
+            if line.to_lowercase().starts_with("content-length:") {
+                if let Some(len_str) = line.split(':').nth(1) {
+                    content_length = len_str.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        if body.len() < content_length {
+            let mut remaining = vec![0u8; content_length - body.len()];
+            if stream.read_exact(&mut remaining).await.is_ok() {
+                body.push_str(&String::from_utf8_lossy(&remaining));
+            }
+        }
+
+        let parsed: Result<Value, _> = serde_json::from_str(&body);
+        let (cmd, args) = match parsed {
+            Ok(val) => (
+                val["cmd"].as_str().unwrap_or("").to_string(),
+                val["args"].clone(),
+            ),
+            Err(e) => {
+                let err_resp = json!({ "error": format!("Invalid JSON: {}", e) }).to_string();
+                send_http_response(&mut stream, 400, "application/json", err_resp.as_bytes()).await;
+                return;
+            }
+        };
+
+        // Determine channel
+        let mut channel_id = None;
+        for param in query.split('&') {
+            let mut pair = param.splitn(2, '=');
+            if pair.next() == Some("channel") {
+                if let Some(val) = pair.next() {
+                    if !val.is_empty() {
+                        channel_id = Some(val.to_string());
+                    }
+                }
+            }
+        }
+        if channel_id.is_none() {
+            if let Some(id) = args["onEvent"]["__tauri_channel_id__"].as_str() {
+                channel_id = Some(id.to_string());
+            } else if let Some(id) = args["on_event"]["__tauri_channel_id__"].as_str() {
+                channel_id = Some(id.to_string());
+            }
+        }
+
+        let sink: Option<Box<dyn EventSink>> = channel_id.map(|cid| {
+            let tx = get_or_create_channel(&channels, &cid);
+            Box::new(SseEventSink { tx }) as Box<dyn EventSink>
+        });
+
+        match dispatch(&cmd, &state, args, sink.as_deref()).await {
+            Ok(result) => {
+                let resp_body = json!({ "result": result }).to_string();
+                send_http_response(&mut stream, 200, "application/json", resp_body.as_bytes()).await;
+            }
+            Err(err) => {
+                let resp_body = json!({ "error": err }).to_string();
+                send_http_response(&mut stream, 200, "application/json", resp_body.as_bytes()).await;
+            }
+        }
+        return;
+    }
+
+    // 4. Static Asset Serving & Dev URL Proxy (G2)
+    if let Ok(dev_url) = std::env::var("NOESIS_DEV_URL") {
+        let trimmed_dev = dev_url.trim_end_matches('/');
+        let target = format!("{}{}", trimmed_dev, path_with_query);
+        if let Ok(resp) = reqwest_proxy(&target, method).await {
+            let _ = stream.write_all(&resp).await;
             return;
         }
     }
-    let _ = Command::new("xdg-open").arg(url).spawn();
+
+    serve_static_asset(&mut stream, path).await;
 }
 
-#[tokio::main]
-async fn main() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let app_data = PathBuf::from(home).join(".local/share/com.noesis.ide");
-    let _ = std::fs::create_dir_all(&app_data);
-    let db_path = app_data.join("noesis_local.db");
+async fn reqwest_proxy(target_url: &str, method: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::new();
+    let resp = match method {
+        "GET" => client.get(target_url).send().await.map_err(|e| e.to_string())?,
+        "HEAD" => client.head(target_url).send().await.map_err(|e| e.to_string())?,
+        _ => client.get(target_url).send().await.map_err(|e| e.to_string())?,
+    };
 
-    let (store, db_degraded, db_error) = match DbStore::open(&db_path) {
-        Ok(s) => (s, false, None),
-        Err(err) => {
-            let msg = format!("数据库打开失败 ({:?}): {}", db_path, err);
-            let mem = DbStore::in_memory().expect("In-memory database initialization failed");
-            (mem, true, Some(msg))
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await.map_err(|e| e.to_string())?;
+
+    let mut raw = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("OK"));
+    for (k, v) in headers.iter() {
+        raw.push_str(&format!("{}: {}\r\n", k.as_str(), v.to_str().unwrap_or("")));
+    }
+    raw.push_str("\r\n");
+
+    let mut out = raw.into_bytes();
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+async fn serve_static_asset(stream: &mut TcpStream, req_path: &str) {
+    let rel_path = req_path.trim_start_matches('/');
+    let target_rel = if rel_path.is_empty() { "index.html" } else { rel_path };
+
+    // Search order:
+    // 1. $EXE_DIR/../share/noesis/dist
+    // 2. /usr/share/noesis/dist
+    // 3. ./dist
+    // 4. Embedded DIST_DIR
+
+    let mut asset_bytes: Option<Vec<u8>> = None;
+    let mut mime_type = get_mime_type(target_rel);
+
+    let candidates = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().and_then(|p| p.parent()).map(|p| p.join("share/noesis/dist"))),
+        Some(PathBuf::from("/usr/share/noesis/dist")),
+        Some(PathBuf::from("./dist")),
+    ];
+
+    for cand_opt in candidates.iter() {
+        if let Some(ref cand) = cand_opt {
+            let file_path = cand.join(target_rel);
+            if file_path.is_file() {
+                if let Ok(bytes) = std::fs::read(&file_path) {
+                    asset_bytes = Some(bytes);
+                    break;
+                }
+            }
+        }
+    }
+
+    if asset_bytes.is_none() {
+        if let Some(file) = DIST_DIR.get_file(target_rel) {
+            asset_bytes = Some(file.contents().to_vec());
+        }
+    }
+
+    // SPA fallback: if not found, serve index.html
+    if asset_bytes.is_none() {
+        for cand_opt in candidates.iter() {
+            if let Some(ref cand) = cand_opt {
+                let file_path = cand.join("index.html");
+                if file_path.is_file() {
+                    if let Ok(bytes) = std::fs::read(&file_path) {
+                        asset_bytes = Some(bytes);
+                        mime_type = "text/html; charset=utf-8";
+                        break;
+                    }
+                }
+            }
+        }
+        if asset_bytes.is_none() {
+            if let Some(file) = DIST_DIR.get_file("index.html") {
+                asset_bytes = Some(file.contents().to_vec());
+                mime_type = "text/html; charset=utf-8";
+            }
+        }
+    }
+
+    let bytes = match asset_bytes {
+        Some(b) => b,
+        None => {
+            let not_found = b"404 Not Found";
+            send_http_response(stream, 404, "text/plain", not_found).await;
+            return;
         }
     };
 
-    let state = Arc::new(AppState {
-        project_manager: Mutex::new(None),
-        project_map: Mutex::new(None),
-        store,
-        db_degraded,
-        db_error,
-        credentials: CredentialStore::new(Some(app_data)),
-        llm: LlmGateway::new(),
-        indexer: CodeIndexer::new(),
-        knowledge_base: KnowledgeBase::load_builtin(),
-        lsp: LspManager::new(),
-        cancellations: CancellationRegistry::new(),
-    });
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind local Noesis IPC socket");
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-    println!("NOESIS v0.1.0 (Linux x86_64) running at {}", url);
-
-    if std::env::var("NOESIS_HEADLESS").is_err() {
-        launch_linux_window(&url);
+    if mime_type.starts_with("text/html") {
+        let html_str = String::from_utf8_lossy(&bytes);
+        let injected = if html_str.contains("</head>") {
+            html_str.replace("</head>", &format!("{}\n</head>", IPC_SHIM_SCRIPT))
+        } else {
+            format!("{}\n{}", IPC_SHIM_SCRIPT, html_str)
+        };
+        send_http_response(stream, 200, mime_type, injected.as_bytes()).await;
+    } else {
+        send_http_response(stream, 200, mime_type, &bytes).await;
     }
+}
 
-    loop {
-        if let Ok((stream, _)) = listener.accept().await {
-            let st = Arc::clone(&state);
-            tokio::spawn(async move {
-                handle_http_connection(stream, st).await;
-            });
-        }
+fn get_mime_type(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") || path.ends_with(".mjs") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".wasm") {
+        "application/wasm"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
     }
+}
+
+async fn send_http_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
+    let status_line = match status {
+        200 => "HTTP/1.1 200 OK",
+        400 => "HTTP/1.1 400 Bad Request",
+        404 => "HTTP/1.1 404 Not Found",
+        _ => "HTTP/1.1 500 Internal Server Error",
+    };
+    let header = format!(
+        "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        status_line,
+        content_type,
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes()).await;
+    let _ = stream.write_all(body).await;
 }

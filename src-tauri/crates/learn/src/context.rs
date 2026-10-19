@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-pub const PROMPT_VERSION: &str = "2.0";
+pub const PROMPT_VERSION: &str = "3.0";
 
 pub trait TokenEstimator: Send + Sync {
     fn estimate(&self, text: &str) -> usize;

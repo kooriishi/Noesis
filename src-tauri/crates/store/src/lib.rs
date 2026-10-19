@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -336,6 +336,9 @@ pub struct DbStore {
 impl DbStore {
     pub fn open<P: AsRef<Path>>(path: P) -> std::result::Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        let _ = conn.query_row("PRAGMA journal_mode=WAL;", [], |_| Ok(()));
+        let _ = conn.execute_batch("PRAGMA synchronous=NORMAL;");
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -720,6 +723,9 @@ impl DbStore {
             "CREATE INDEX IF NOT EXISTS idx_prompt_presets_scope ON prompt_presets(scope, is_active);",
             "CREATE INDEX IF NOT EXISTS idx_confusion_revisions_mark ON confusion_revisions(mark_id, level);",
             "CREATE INDEX IF NOT EXISTS idx_explanation_feedback ON explanation_feedback(explanation_id, feedback);",
+            "CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);",
+            "CREATE INDEX IF NOT EXISTS idx_entities_file ON entities(file_id);",
+            "CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_id);",
         ];
         for idx_sql in indexes {
             let _ = conn.execute(idx_sql, []);
@@ -804,7 +810,7 @@ impl DbStore {
         edges: &[GraphEdge],
     ) -> std::result::Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         // Delete prior data originating from this file
         tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![file.id])?;
@@ -932,7 +938,7 @@ impl DbStore {
             return Ok(0);
         }
 
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for stale_id in &stale {
             tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![stale_id])?;
             tx.execute("DELETE FROM entities WHERE file_id = ?1", params![stale_id])?;
@@ -953,7 +959,7 @@ impl DbStore {
         edges: &[GraphEdge],
     ) -> std::result::Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         // Clear old domain entities for this project + domain
         tx.execute(
@@ -1811,7 +1817,7 @@ impl DbStore {
 
     pub fn save_prompt_preset(&self, preset: &PromptPreset) -> std::result::Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if preset.is_active {
             tx.execute(
                 "UPDATE prompt_presets SET is_active = 0 WHERE scope = ?1",
@@ -1840,7 +1846,7 @@ impl DbStore {
 
     pub fn set_active_prompt_preset(&self, id: &str, scope: &str) -> std::result::Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "UPDATE prompt_presets SET is_active = 0 WHERE scope = ?1",
             params![scope],
@@ -1973,7 +1979,7 @@ impl DbStore {
 
     pub fn delete_confusion_mark(&self, mark_id: &str) -> std::result::Result<(), StoreError> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM marks WHERE id = ?1", params![mark_id])?;
         tx.execute("DELETE FROM confusion_revisions WHERE mark_id = ?1", params![mark_id])?;
         tx.commit()?;
@@ -2629,16 +2635,6 @@ mod tests {
             .upsert_file_graph(&file, &[], &[], &[])
             .expect("upsert_file_graph after legacy migration");
         let _ = std::fs::remove_file(&tmp);
-
-        // Also migrate existing local AppData db if present
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let local_db = std::path::PathBuf::from(appdata)
-                .join("com.noesis.ide")
-                .join("noesis_local.db");
-            if local_db.exists() {
-                let _ = DbStore::open(&local_db);
-            }
-        }
     }
 
     #[test]
