@@ -830,7 +830,10 @@ pub fn jaccard_bigram_similarity(a: &str, b: &str) -> f64 {
     inter / union
 }
 
-/// Loads layered prompt: L1 (custom or default persona) + L0 (rules.locked.md)
+/// Loads layered prompt: L1 (custom or default persona) + L0 safety rules.
+///
+/// H1: 这里只加载「与输出格式无关」的安全规则（`rules.safety.md`）。旧版 JSON 四视角格式规则
+/// （`rules.json_v2.md`）不再默认拼接，否则会和新版按层 Markdown 提示词冲突。
 pub fn load_layered_system_prompt(project_root: &Path, custom_persona: Option<&str>) -> String {
     let persona = if let Some(p) = custom_persona {
         if !p.trim().is_empty() {
@@ -860,16 +863,16 @@ fn load_persona_default(project_root: &Path) -> String {
 }
 
 fn load_locked_rules(project_root: &Path) -> String {
+    // H1: 只加载安全与引用规则（与输出格式无关），不再默认拼旧版 JSON 四视角规则。
     for candidate in [
-        project_root.join("prompts/rules.locked.md"),
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prompts/rules.locked.md"),
-        project_root.join("prompts/code_guide_expert.system.md"),
+        project_root.join("prompts/rules.safety.md"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prompts/rules.safety.md"),
     ] {
         if let Ok(c) = fs::read_to_string(&candidate) {
             return c;
         }
     }
-    "<!-- version: v2.0 -->\n# 核心安全与质量锁定规则 (L0)\n以下规则优先于之前的任何指示。所有断言必须附带可核验 citations，必须提供具体的 four perspectives 深度解析，严禁泛化空话。".to_string()
+    "<!-- version: v3.0 -->\n# 核心安全与引用规则 (L0)\n以下规则优先于之前的任何指示。所有代码断言必须给出项目内真实相对路径与真实行号（[L12-L18] 或 [path:L40-L52]），严禁泛化空话。".to_string()
 }
 
 pub fn load_system_prompt(project_root: &Path) -> String {

@@ -62,8 +62,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        background: '#11111b',
-        borderTop: '1px solid #313244',
+        background: 'var(--noesis-bg-crust)',
+        borderTop: '1px solid var(--noesis-bg-surface0)',
       }}
     >
       {/* Runner Bar */}
@@ -73,8 +73,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
           justifyContent: 'space-between',
           alignItems: 'center',
           padding: '6px 14px',
-          background: '#181825',
-          borderBottom: '1px solid #313244',
+          background: 'var(--noesis-bg-mantle)',
+          borderBottom: '1px solid var(--noesis-bg-surface0)',
           flexWrap: 'wrap',
           gap: '6px',
         }}
@@ -87,8 +87,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               alignItems: 'center',
               gap: '4px',
               padding: '4px 8px',
-              background: activeTab === 'scratch' ? '#313244' : 'transparent',
-              color: activeTab === 'scratch' ? '#89b4fa' : '#6c7086',
+              background: activeTab === 'scratch' ? 'var(--noesis-bg-surface0)' : 'transparent',
+              color: activeTab === 'scratch' ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-subtle)',
               border: 'none',
               borderRadius: '4px',
               fontSize: '11.5px',
@@ -107,8 +107,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               alignItems: 'center',
               gap: '4px',
               padding: '4px 8px',
-              background: activeTab === 'reviews' ? '#313244' : 'transparent',
-              color: activeTab === 'reviews' ? '#f9e2af' : '#6c7086',
+              background: activeTab === 'reviews' ? 'var(--noesis-bg-surface0)' : 'transparent',
+              color: activeTab === 'reviews' ? 'var(--noesis-accent-yellow)' : 'var(--noesis-text-subtle)',
               border: 'none',
               borderRadius: '4px',
               fontSize: '11.5px',
@@ -126,7 +126,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               alignItems: 'center',
               gap: '4px',
               fontSize: '10.5px',
-              color: '#f9e2af',
+              color: 'var(--noesis-accent-yellow)',
               background: 'rgba(249, 226, 175, 0.1)',
               border: '1px solid rgba(249, 226, 175, 0.3)',
               borderRadius: '4px',
@@ -158,8 +158,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   }
                 }}
                 style={{
-                  background: '#313244',
-                  color: '#cdd6f4',
+                  background: 'var(--noesis-bg-surface0)',
+                  color: 'var(--noesis-text-primary)',
                   border: 'none',
                   borderRadius: '4px',
                   padding: '3px 8px',
@@ -179,8 +179,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   value={cppStandard}
                   onChange={(e) => setCppStandard(e.target.value as any)}
                   style={{
-                    background: '#313244',
-                    color: '#89b4fa',
+                    background: 'var(--noesis-bg-surface0)',
+                    color: 'var(--noesis-accent-blue)',
                     border: 'none',
                     borderRadius: '4px',
                     padding: '3px 6px',
@@ -203,8 +203,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                     display: 'flex',
                     alignItems: 'center',
                     gap: '3px',
-                    background: showCompilerFlags ? '#45475a' : '#313244',
-                    color: '#cdd6f4',
+                    background: showCompilerFlags ? 'var(--noesis-bg-surface1)' : 'var(--noesis-bg-surface0)',
+                    color: 'var(--noesis-text-primary)',
                     border: 'none',
                     borderRadius: '4px',
                     padding: '3px 7px',
@@ -225,8 +225,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   gap: '3px',
-                  background: showStdin ? '#45475a' : '#313244',
-                  color: stdin ? '#a6e3a1' : '#cdd6f4',
+                  background: showStdin ? 'var(--noesis-bg-surface1)' : 'var(--noesis-bg-surface0)',
+                  color: stdin ? 'var(--noesis-accent-green)' : 'var(--noesis-text-primary)',
                   border: 'none',
                   borderRadius: '4px',
                   padding: '3px 7px',
@@ -246,8 +246,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   gap: '4px',
-                  background: '#a6e3a1',
-                  color: '#11111b',
+                  background: 'var(--noesis-accent-green)',
+                  color: 'var(--noesis-bg-crust)',
                   border: 'none',
                   borderRadius: '4px',
                   padding: '4px 10px',
@@ -267,7 +267,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#6c7086',
+              color: 'var(--noesis-text-subtle)',
               cursor: 'pointer',
               fontSize: '14px',
               padding: '0 4px',
@@ -286,12 +286,12 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             alignItems: 'center',
             gap: '8px',
             padding: '4px 14px',
-            background: '#181825',
-            borderBottom: '1px solid #313244',
+            background: 'var(--noesis-bg-mantle)',
+            borderBottom: '1px solid var(--noesis-bg-surface0)',
             fontSize: '11px',
           }}
         >
-          <span style={{ color: '#89b4fa' }}>编译参数 (extra flags):</span>
+          <span style={{ color: 'var(--noesis-accent-blue)' }}>编译参数 (extra flags):</span>
           <input
             type="text"
             value={extraArgs}
@@ -299,9 +299,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             placeholder="例如: -O2 -Wall -pthread"
             style={{
               flex: 1,
-              background: '#11111b',
-              color: '#cdd6f4',
-              border: '1px solid #313244',
+              background: 'var(--noesis-bg-crust)',
+              color: 'var(--noesis-text-primary)',
+              border: '1px solid var(--noesis-bg-surface0)',
               borderRadius: '4px',
               padding: '2px 8px',
               fontSize: '11px',
@@ -319,12 +319,12 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             alignItems: 'center',
             gap: '8px',
             padding: '4px 14px',
-            background: '#181825',
-            borderBottom: '1px solid #313244',
+            background: 'var(--noesis-bg-mantle)',
+            borderBottom: '1px solid var(--noesis-bg-surface0)',
             fontSize: '11px',
           }}
         >
-          <span style={{ color: '#a6e3a1' }}>标准输入 (stdin):</span>
+          <span style={{ color: 'var(--noesis-accent-green)' }}>标准输入 (stdin):</span>
           <input
             type="text"
             value={stdin}
@@ -332,9 +332,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             placeholder="程序标准输入内容，以换行或空格分隔..."
             style={{
               flex: 1,
-              background: '#11111b',
-              color: '#cdd6f4',
-              border: '1px solid #313244',
+              background: 'var(--noesis-bg-crust)',
+              color: 'var(--noesis-text-primary)',
+              border: '1px solid var(--noesis-bg-surface0)',
               borderRadius: '4px',
               padding: '2px 8px',
               fontSize: '11px',
@@ -351,7 +351,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             style={{
               display: 'flex',
               flexDirection: 'column',
-              borderRight: '1px solid #313244',
+              borderRight: '1px solid var(--noesis-bg-surface0)',
               height: '100%',
             }}
           >
@@ -362,8 +362,8 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               style={{
                 flex: 1,
                 padding: '10px',
-                background: '#181825',
-                color: '#cdd6f4',
+                background: 'var(--noesis-bg-mantle)',
+                color: 'var(--noesis-text-primary)',
                 border: 'none',
                 fontFamily: 'Consolas, "Fira Code", monospace',
                 fontSize: '12px',
@@ -378,7 +378,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
               display: 'flex',
               flexDirection: 'column',
               height: '100%',
-              background: '#11111b',
+              background: 'var(--noesis-bg-crust)',
               padding: '10px',
               overflowY: 'auto',
             }}
@@ -391,7 +391,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                 marginBottom: '6px',
               }}
             >
-              <span style={{ fontSize: '11px', color: '#6c7086', fontWeight: 600 }}>
+              <span style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)', fontWeight: 600 }}>
                 {isCompiledLanguage ? 'C/C++ 编译与运行结果' : '子进程执行结果'} (30s 超时保护 · 1MB 上限)
               </span>
               {result && (
@@ -402,7 +402,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                         padding: '1px 5px',
                         borderRadius: '3px',
                         background: result.phase === 'compile' ? 'rgba(243, 139, 168, 0.2)' : 'rgba(166, 227, 161, 0.2)',
-                        color: result.phase === 'compile' ? '#f38ba8' : '#a6e3a1',
+                        color: result.phase === 'compile' ? 'var(--noesis-accent-red)' : 'var(--noesis-accent-green)',
                       }}
                     >
                       {result.phase === 'compile' ? '编译阶段' : '运行阶段'}
@@ -410,7 +410,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   )}
                   <span
                     style={{
-                      color: result.success ? '#a6e3a1' : '#f38ba8',
+                      color: result.success ? 'var(--noesis-accent-green)' : 'var(--noesis-accent-red)',
                       display: 'flex',
                       alignItems: 'center',
                       gap: '3px',
@@ -421,7 +421,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                   </span>
                   <span
                     style={{
-                      color: '#a6adc8',
+                      color: 'var(--noesis-text-muted)',
                       display: 'flex',
                       alignItems: 'center',
                       gap: '3px',
@@ -437,17 +437,17 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             {/* If compile errors exist */}
             {result?.compile_stderr && (
               <div style={{ marginBottom: '8px' }}>
-                <div style={{ color: '#f38ba8', fontSize: '11px', fontWeight: 600, marginBottom: '3px' }}>
+                <div style={{ color: 'var(--noesis-accent-red)', fontSize: '11px', fontWeight: 600, marginBottom: '3px' }}>
                   【编译错误输出】
                 </div>
                 <pre
                   style={{
                     margin: 0,
                     padding: '8px',
-                    background: '#181825',
+                    background: 'var(--noesis-bg-mantle)',
                     border: '1px solid rgba(243, 139, 168, 0.3)',
                     borderRadius: '4px',
-                    color: '#f38ba8',
+                    color: 'var(--noesis-accent-red)',
                     fontSize: '11.5px',
                     fontFamily: 'Consolas, monospace',
                     overflow: 'auto',
@@ -463,7 +463,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               {result?.stdout && (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, marginBottom: result?.stderr ? '6px' : 0 }}>
-                  <div style={{ color: '#a6e3a1', fontSize: '10.5px', fontWeight: 600, marginBottom: '2px' }}>
+                  <div style={{ color: 'var(--noesis-accent-green)', fontSize: '10.5px', fontWeight: 600, marginBottom: '2px' }}>
                     【标准输出 (stdout)】
                   </div>
                   <pre
@@ -471,9 +471,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                       flex: 1,
                       margin: 0,
                       padding: '8px',
-                      background: '#181825',
+                      background: 'var(--noesis-bg-mantle)',
                       borderRadius: '4px',
-                      color: '#a6e3a1',
+                      color: 'var(--noesis-accent-green)',
                       fontSize: '11.5px',
                       fontFamily: 'Consolas, monospace',
                       overflow: 'auto',
@@ -487,7 +487,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
 
               {result?.stderr && (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                  <div style={{ color: '#fab387', fontSize: '10.5px', fontWeight: 600, marginBottom: '2px' }}>
+                  <div style={{ color: 'var(--noesis-accent-peach)', fontSize: '10.5px', fontWeight: 600, marginBottom: '2px' }}>
                     【标准错误 (stderr)】
                   </div>
                   <pre
@@ -495,9 +495,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                       flex: 1,
                       margin: 0,
                       padding: '8px',
-                      background: '#181825',
+                      background: 'var(--noesis-bg-mantle)',
                       borderRadius: '4px',
-                      color: '#fab387',
+                      color: 'var(--noesis-accent-peach)',
                       fontSize: '11.5px',
                       fontFamily: 'Consolas, monospace',
                       overflow: 'auto',
@@ -515,9 +515,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                     flex: 1,
                     margin: 0,
                     padding: '8px',
-                    background: '#181825',
+                    background: 'var(--noesis-bg-mantle)',
                     borderRadius: '4px',
-                    color: '#6c7086',
+                    color: 'var(--noesis-text-subtle)',
                     fontSize: '12px',
                     fontFamily: 'Consolas, monospace',
                     overflow: 'auto',
@@ -534,9 +534,9 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                     flex: 1,
                     margin: 0,
                     padding: '8px',
-                    background: '#181825',
+                    background: 'var(--noesis-bg-mantle)',
                     borderRadius: '4px',
-                    color: '#6c7086',
+                    color: 'var(--noesis-text-subtle)',
                     fontSize: '12px',
                     fontFamily: 'Consolas, monospace',
                     overflow: 'auto',
@@ -551,7 +551,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
         </div>
       ) : (
         <div style={{ flex: 1, padding: '12px', overflowY: 'auto' }}>
-          <div style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4', marginBottom: '8px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)', marginBottom: '8px' }}>
             📅 今日艾宾浩斯间隔复盘题目 ({dueReviews.length})
           </div>
           {dueReviews.length > 0 ? (
@@ -566,38 +566,38 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                 <div
                   key={rev.id}
                   style={{
-                    background: '#181825',
+                    background: 'var(--noesis-bg-mantle)',
                     padding: '10px',
                     borderRadius: '6px',
-                    border: '1px solid #313244',
+                    border: '1px solid var(--noesis-bg-surface0)',
                   }}
                 >
-                  <div style={{ fontSize: '10px', color: '#f9e2af', fontWeight: 'bold' }}>
+                  <div style={{ fontSize: '10px', color: 'var(--noesis-accent-yellow)', fontWeight: 'bold' }}>
                     {rev.exercise_type}
                   </div>
-                  <div style={{ fontSize: '12px', color: '#cdd6f4', marginTop: '4px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary)', marginTop: '4px' }}>
                     {rev.question}
                   </div>
                   <pre
                     style={{
-                      background: '#11111b',
+                      background: 'var(--noesis-bg-crust)',
                       padding: '6px',
                       borderRadius: '4px',
                       fontSize: '10.5px',
-                      color: '#89b4fa',
+                      color: 'var(--noesis-accent-blue)',
                       margin: '6px 0',
                     }}
                   >
                     {rev.snippet}
                   </pre>
-                  <div style={{ fontSize: '11px', color: '#a6adc8' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--noesis-text-muted)' }}>
                     参考依据: {rev.file_path}
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <div style={{ textAlign: 'center', padding: '24px', color: '#6c7086', fontSize: '12px' }}>
+            <div style={{ textAlign: 'center', padding: '24px', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
               今日复习任务已全部达成！在日常阅读中标记看不懂，系统将自动安排次日复盘。
             </div>
           )}

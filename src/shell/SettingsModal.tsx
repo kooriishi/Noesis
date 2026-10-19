@@ -25,6 +25,7 @@ import {
 } from '../types';
 import { ApiService } from '../services/api';
 import { useToast } from '../components/feedback';
+import { THEME_OPTIONS, MONO_FONT_OPTIONS } from './themeOptions';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -222,8 +223,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         style={{
           width: '680px',
           maxHeight: '88vh',
-          backgroundColor: 'var(--noesis-bg-mantle, #181825)',
-          border: '1px solid var(--noesis-bg-surface0, #313244)',
+          backgroundColor: 'var(--noesis-bg-mantle)',
+          border: '1px solid var(--noesis-bg-surface0)',
           borderRadius: 'var(--noesis-radius-lg, 10px)',
           boxShadow: 'var(--noesis-shadow-lg, 0 16px 40px rgba(0, 0, 0, 0.6))',
           display: 'flex',
@@ -237,16 +238,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div
           style={{
             padding: '12px 18px',
-            borderBottom: '1px solid var(--noesis-bg-surface0, #313244)',
+            borderBottom: '1px solid var(--noesis-bg-surface0)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            background: 'var(--noesis-bg-crust, #11111b)',
+            background: 'var(--noesis-bg-crust)',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Sliders size={18} color="var(--noesis-accent-blue, #89b4fa)" />
-            <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--noesis-text-primary, #cdd6f4)' }}>
+            <Sliders size={18} color="var(--noesis-accent-blue)" />
+            <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>
               IDE 系统偏好设置
             </span>
           </div>
@@ -256,7 +257,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             style={{
               background: 'transparent',
               border: 'none',
-              color: 'var(--noesis-text-subtle, #6c7086)',
+              color: 'var(--noesis-text-subtle)',
               cursor: 'pointer',
               padding: '4px',
             }}
@@ -269,8 +270,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div
           style={{
             display: 'flex',
-            background: 'var(--noesis-bg-crust, #11111b)',
-            borderBottom: '1px solid var(--noesis-bg-surface0, #313244)',
+            background: 'var(--noesis-bg-crust)',
+            borderBottom: '1px solid var(--noesis-bg-surface0)',
             padding: '0 12px',
             gap: '8px',
           }}
@@ -293,10 +294,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   padding: '9px 12px',
                   fontSize: '12px',
                   fontWeight: isActive ? 600 : 400,
-                  color: isActive ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-text-muted, #a6adc8)',
+                  color: isActive ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-muted)',
                   background: 'transparent',
                   border: 'none',
-                  borderBottom: isActive ? '2px solid var(--noesis-accent-blue, #89b4fa)' : '2px solid transparent',
+                  borderBottom: isActive ? '2px solid var(--noesis-accent-blue)' : '2px solid transparent',
                   cursor: 'pointer',
                 }}
               >
@@ -323,10 +324,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
                   padding: '14px',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '12px',
@@ -334,10 +335,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500 }}>
+                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
                       代码字体大小 (Editor Font Size)
                     </div>
-                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle, #6c7086)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
                       实时调整 CodeMirror 6 代码编辑区字号
                     </div>
                   </div>
@@ -356,7 +357,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <span
                       style={{
                         fontSize: '12px',
-                        color: 'var(--noesis-accent-blue, #89b4fa)',
+                        color: 'var(--noesis-accent-blue)',
                         fontWeight: 600,
                         width: '32px',
                         textAlign: 'right',
@@ -369,10 +370,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500 }}>
+                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
                       全局界面字号 (UI Font Scale)
                     </div>
-                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle, #6c7086)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
                       实时缩放侧边栏、状态栏和卡片标签等文字大小
                     </div>
                   </div>
@@ -391,7 +392,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <span
                       style={{
                         fontSize: '12px',
-                        color: 'var(--noesis-accent-blue, #89b4fa)',
+                        color: 'var(--noesis-accent-blue)',
                         fontWeight: 600,
                         width: '32px',
                         textAlign: 'right',
@@ -404,10 +405,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500 }}>
+                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
                       自动换行 (Word Wrap)
                     </div>
-                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle, #6c7086)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
                       长代码行自动折行显示
                     </div>
                   </div>
@@ -418,25 +419,222 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     style={{ cursor: 'pointer' }}
                   />
                 </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
+                      行高 (Line Height)
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
+                      代码与解读正文的行间距
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      type="range"
+                      min="1.2"
+                      max="2.2"
+                      step="0.1"
+                      value={settings.lineHeight ?? 1.6}
+                      onChange={(e) =>
+                        onUpdateSettings({ ...settings, lineHeight: Number(e.target.value) })
+                      }
+                      style={{ width: '90px' }}
+                    />
+                    <span
+                      style={{
+                        fontSize: '12px',
+                        color: 'var(--noesis-accent-blue)',
+                        fontWeight: 600,
+                        width: '32px',
+                        textAlign: 'right',
+                      }}
+                    >
+                      {(settings.lineHeight ?? 1.6).toFixed(1)}
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
+                      Tab 宽度 (Tab Size)
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
+                      编辑器缩进宽度
+                    </div>
+                  </div>
+                  <select
+                    value={settings.tabSize}
+                    onChange={(e) => onUpdateSettings({ ...settings, tabSize: Number(e.target.value) })}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--noesis-bg-surface0)',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: 'var(--noesis-text-primary)',
+                      fontSize: '12px',
+                    }}
+                  >
+                    {[2, 4, 8].map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* H4: 配色主题 */}
+              <div
+                style={{
+                  background: 'var(--noesis-bg-base)',
+                  borderRadius: 'var(--noesis-radius-md, 8px)',
+                  padding: '14px',
+                  border: '1px solid var(--noesis-bg-surface0)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 600 }}>
+                  配色主题 (IDE Theme)
+                </div>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {THEME_OPTIONS.map((t) => {
+                    const isActive = settings.theme === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => onUpdateSettings({ ...settings, theme: t.id })}
+                        style={{
+                          padding: '5px 10px',
+                          borderRadius: '14px',
+                          fontSize: '11.5px',
+                          border: '1px solid',
+                          borderColor: isActive
+                            ? 'var(--noesis-accent-blue)'
+                            : 'var(--noesis-bg-surface0)',
+                          background: isActive
+                            ? 'rgba(137, 180, 250, 0.18)'
+                            : 'var(--noesis-bg-mantle)',
+                          color: isActive
+                            ? 'var(--noesis-accent-blue)'
+                            : 'var(--noesis-text-muted)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* H4: 字体族 */}
+              <div
+                style={{
+                  background: 'var(--noesis-bg-base)',
+                  borderRadius: 'var(--noesis-radius-md, 8px)',
+                  padding: '14px',
+                  border: '1px solid var(--noesis-bg-surface0)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                    等宽字体族 (Code Font)
+                  </div>
+                  <select
+                    value={
+                      MONO_FONT_OPTIONS.includes(settings.fontFamily)
+                        ? settings.fontFamily
+                        : '__custom__'
+                    }
+                    onChange={(e) => {
+                      if (e.target.value !== '__custom__') {
+                        onUpdateSettings({ ...settings, fontFamily: e.target.value });
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '5px 8px',
+                      background: 'var(--noesis-bg-surface0)',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: 'var(--noesis-text-primary)',
+                      fontSize: '11.5px',
+                    }}
+                  >
+                    {MONO_FONT_OPTIONS.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                    <option value="__custom__">自定义…</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={settings.fontFamily}
+                    onChange={(e) => onUpdateSettings({ ...settings, fontFamily: e.target.value })}
+                    placeholder='"JetBrains Mono", Consolas, monospace'
+                    style={{
+                      width: '100%',
+                      marginTop: 6,
+                      boxSizing: 'border-box',
+                      padding: '5px 8px',
+                      background: 'var(--noesis-bg-surface0)',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: 'var(--noesis-text-primary)',
+                      fontSize: '11.5px',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <div style={{ fontSize: '12.5px', color: 'var(--noesis-text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                    界面字体族 (UI Font)
+                  </div>
+                  <input
+                    type="text"
+                    value={settings.uiFontFamily || ''}
+                    onChange={(e) => onUpdateSettings({ ...settings, uiFontFamily: e.target.value })}
+                    placeholder="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '5px 8px',
+                      background: 'var(--noesis-bg-surface0)',
+                      border: 'none',
+                      borderRadius: '4px',
+                      color: 'var(--noesis-text-primary)',
+                      fontSize: '11.5px',
+                    }}
+                  />
+                </div>
               </div>
 
               {/* Reset layout */}
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
                   padding: '12px 14px',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
                 }}
               >
                 <div>
-                  <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500 }}>
+                  <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
                     重置三栏窗格布局
                   </div>
-                  <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle, #6c7086)' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
                     恢复左侧 260px、右侧 380px 的默认分割比例
                   </div>
                 </div>
@@ -450,8 +648,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     alignItems: 'center',
                     gap: '5px',
                     padding: '5px 10px',
-                    background: 'var(--noesis-bg-surface0, #313244)',
-                    color: 'var(--noesis-text-primary, #cdd6f4)',
+                    background: 'var(--noesis-bg-surface0)',
+                    color: 'var(--noesis-text-primary)',
                     border: 'none',
                     borderRadius: 'var(--noesis-radius-sm, 4px)',
                     fontSize: '11.5px',
@@ -470,17 +668,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
                   padding: '14px',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '10px',
                 }}
               >
                 <div>
-                  <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', display: 'block', marginBottom: '4px' }}>
+                  <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', display: 'block', marginBottom: '4px' }}>
                     接口地址 (API Endpoint)
                   </label>
                   <input
@@ -492,19 +690,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       width: '100%',
                       boxSizing: 'border-box',
                       padding: '6px 8px',
-                      background: 'var(--noesis-bg-surface0, #313244)',
+                      background: 'var(--noesis-bg-surface0)',
                       border: 'none',
                       borderRadius: 'var(--noesis-radius-sm, 4px)',
-                      color: 'var(--noesis-text-primary, #cdd6f4)',
+                      color: 'var(--noesis-text-primary)',
                       fontSize: '12px',
                     }}
                   />
                 </div>
 
                 <div>
-                  <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', display: 'block', marginBottom: '4px' }}>
+                  <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', display: 'block', marginBottom: '4px' }}>
                     模型密钥 (API Key) — 当前状态:{' '}
-                    <strong style={{ color: llmConfig.has_api_key ? 'var(--noesis-accent-green, #a6e3a1)' : 'var(--noesis-accent-yellow, #f9e2af)' }}>
+                    <strong style={{ color: llmConfig.has_api_key ? 'var(--noesis-accent-green)' : 'var(--noesis-accent-yellow)' }}>
                       {llmConfig.has_api_key
                         ? `已安全存储 (${llmConfig.api_key_masked})`
                         : '未配置'}
@@ -524,10 +722,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         flex: 1,
                         boxSizing: 'border-box',
                         padding: '6px 8px',
-                        background: 'var(--noesis-bg-surface0, #313244)',
+                        background: 'var(--noesis-bg-surface0)',
                         border: 'none',
                         borderRadius: 'var(--noesis-radius-sm, 4px)',
-                        color: 'var(--noesis-text-primary, #cdd6f4)',
+                        color: 'var(--noesis-text-primary)',
                         fontSize: '12px',
                       }}
                     />
@@ -536,8 +734,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       disabled={!newKeyInput.trim()}
                       style={{
                         padding: '6px 12px',
-                        background: 'var(--noesis-accent-blue, #89b4fa)',
-                        color: 'var(--noesis-bg-crust, #11111b)',
+                        background: 'var(--noesis-accent-blue)',
+                        color: 'var(--noesis-bg-crust)',
                         border: 'none',
                         borderRadius: 'var(--noesis-radius-sm, 4px)',
                         fontSize: '11.5px',
@@ -560,7 +758,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           gap: '4px',
                           padding: '6px 10px',
                           background: 'rgba(243, 139, 168, 0.15)',
-                          color: 'var(--noesis-accent-red, #f38ba8)',
+                          color: 'var(--noesis-accent-red)',
                           border: '1px solid rgba(243, 139, 168, 0.3)',
                           borderRadius: 'var(--noesis-radius-sm, 4px)',
                           fontSize: '11px',
@@ -576,7 +774,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                   <div>
-                    <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', display: 'block', marginBottom: '4px' }}>
+                    <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', display: 'block', marginBottom: '4px' }}>
                       模型名称 (Model)
                     </label>
                     <input
@@ -587,16 +785,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         width: '100%',
                         boxSizing: 'border-box',
                         padding: '6px 8px',
-                        background: 'var(--noesis-bg-surface0, #313244)',
+                        background: 'var(--noesis-bg-surface0)',
                         border: 'none',
                         borderRadius: 'var(--noesis-radius-sm, 4px)',
-                        color: 'var(--noesis-text-primary, #cdd6f4)',
+                        color: 'var(--noesis-text-primary)',
                         fontSize: '12px',
                       }}
                     />
                   </div>
                   <div>
-                    <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', display: 'block', marginBottom: '4px' }}>
+                    <label style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', display: 'block', marginBottom: '4px' }}>
                       采样温度 (Temperature)
                     </label>
                     <input
@@ -615,10 +813,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         width: '100%',
                         boxSizing: 'border-box',
                         padding: '6px 8px',
-                        background: 'var(--noesis-bg-surface0, #313244)',
+                        background: 'var(--noesis-bg-surface0)',
                         border: 'none',
                         borderRadius: 'var(--noesis-radius-sm, 4px)',
-                        color: 'var(--noesis-text-primary, #cdd6f4)',
+                        color: 'var(--noesis-text-primary)',
                         fontSize: '12px',
                       }}
                     />
@@ -634,8 +832,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       alignItems: 'center',
                       gap: '6px',
                       padding: '6px 12px',
-                      background: 'var(--noesis-bg-surface0, #313244)',
-                      color: 'var(--noesis-text-primary, #cdd6f4)',
+                      background: 'var(--noesis-bg-surface0)',
+                      color: 'var(--noesis-text-primary)',
                       border: 'none',
                       borderRadius: 'var(--noesis-radius-sm, 4px)',
                       fontSize: '11.5px',
@@ -649,7 +847,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <span
                       style={{
                         fontSize: '11px',
-                        color: testResult.ok ? 'var(--noesis-accent-green, #a6e3a1)' : 'var(--noesis-accent-red, #f38ba8)',
+                        color: testResult.ok ? 'var(--noesis-accent-green)' : 'var(--noesis-accent-red)',
                       }}
                     >
                       {testResult.message}
@@ -665,7 +863,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     display: 'flex',
                     alignItems: 'center',
                     gap: '6px',
-                    color: 'var(--noesis-accent-green, #a6e3a1)',
+                    color: 'var(--noesis-accent-green)',
                     fontSize: '11px',
                     marginTop: '4px',
                   }}
@@ -684,8 +882,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               {/* Scene Scope Switcher */}
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ fontSize: '12px', color: 'var(--noesis-text-muted, #a6adc8)' }}>适用场景:</span>
-                <div style={{ display: 'flex', background: 'var(--noesis-bg-base, #1e1e2e)', padding: '2px', borderRadius: '6px', border: '1px solid var(--noesis-bg-surface0, #313244)' }}>
+                <span style={{ fontSize: '12px', color: 'var(--noesis-text-muted)' }}>适用场景:</span>
+                <div style={{ display: 'flex', background: 'var(--noesis-bg-base)', padding: '2px', borderRadius: '6px', border: '1px solid var(--noesis-bg-surface0)' }}>
                   <button
                     onClick={() => setAgentScope('explain')}
                     style={{
@@ -693,8 +891,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       fontSize: '11.5px',
                       borderRadius: '4px',
                       border: 'none',
-                      background: agentScope === 'explain' ? 'var(--noesis-accent-blue, #89b4fa)' : 'transparent',
-                      color: agentScope === 'explain' ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-primary, #cdd6f4)',
+                      background: agentScope === 'explain' ? 'var(--noesis-accent-blue)' : 'transparent',
+                      color: agentScope === 'explain' ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-primary)',
                       fontWeight: 600,
                       cursor: 'pointer',
                     }}
@@ -708,8 +906,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       fontSize: '11.5px',
                       borderRadius: '4px',
                       border: 'none',
-                      background: agentScope === 'ask' ? 'var(--noesis-accent-blue, #89b4fa)' : 'transparent',
-                      color: agentScope === 'ask' ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-primary, #cdd6f4)',
+                      background: agentScope === 'ask' ? 'var(--noesis-accent-blue)' : 'transparent',
+                      color: agentScope === 'ask' ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-primary)',
                       fontWeight: 600,
                       cursor: 'pointer',
                     }}
@@ -726,8 +924,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       alignItems: 'center',
                       gap: '4px',
                       padding: '4px 8px',
-                      background: 'var(--noesis-bg-surface0, #313244)',
-                      color: 'var(--noesis-accent-blue, #89b4fa)',
+                      background: 'var(--noesis-bg-surface0)',
+                      color: 'var(--noesis-accent-blue)',
                       border: 'none',
                       borderRadius: '4px',
                       fontSize: '11px',
@@ -745,8 +943,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       gap: '4px',
                       padding: '4px 8px',
                       background: 'transparent',
-                      color: 'var(--noesis-text-subtle, #6c7086)',
-                      border: '1px solid var(--noesis-bg-surface0, #313244)',
+                      color: 'var(--noesis-text-subtle)',
+                      border: '1px solid var(--noesis-bg-surface0)',
                       borderRadius: '4px',
                       fontSize: '11px',
                       cursor: 'pointer',
@@ -761,16 +959,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* Preset Selector */}
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
                   padding: '12px',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
                 }}
               >
-                <label style={{ fontSize: '11.5px', color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500 }}>
+                <label style={{ fontSize: '11.5px', color: 'var(--noesis-text-primary)', fontWeight: 500 }}>
                   当前选择预设:
                 </label>
                 <select
@@ -779,10 +977,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   style={{
                     flex: 1,
                     padding: '5px 8px',
-                    background: 'var(--noesis-bg-surface0, #313244)',
+                    background: 'var(--noesis-bg-surface0)',
                     border: 'none',
                     borderRadius: '4px',
-                    color: 'var(--noesis-text-primary, #cdd6f4)',
+                    color: 'var(--noesis-text-primary)',
                     fontSize: '11.5px',
                   }}
                 >
@@ -800,8 +998,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     alignItems: 'center',
                     gap: '4px',
                     padding: '5px 10px',
-                    background: 'var(--noesis-accent-green, #a6e3a1)',
-                    color: 'var(--noesis-bg-crust, #11111b)',
+                    background: 'var(--noesis-accent-green)',
+                    color: 'var(--noesis-bg-crust)',
                     border: 'none',
                     borderRadius: '4px',
                     fontSize: '11.5px',
@@ -817,14 +1015,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* L1 Persona Editor */}
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
                   padding: '12px',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-accent-lavender, #b4befe)', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-accent-lavender)', display: 'flex', alignItems: 'center', gap: '5px' }}>
                     <Sparkles size={14} />
                     L1 · 人设风格设定（用户自由定制）
                   </div>
@@ -833,8 +1031,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     disabled={isSavingPreset}
                     style={{
                       padding: '4px 10px',
-                      background: 'var(--noesis-accent-blue, #89b4fa)',
-                      color: 'var(--noesis-bg-crust, #11111b)',
+                      background: 'var(--noesis-accent-blue)',
+                      color: 'var(--noesis-bg-crust)',
                       border: 'none',
                       borderRadius: '4px',
                       fontSize: '11px',
@@ -853,11 +1051,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   style={{
                     width: '100%',
                     boxSizing: 'border-box',
-                    background: 'var(--noesis-bg-surface0, #313244)',
+                    background: 'var(--noesis-bg-surface0)',
                     border: 'none',
                     borderRadius: '4px',
                     padding: '8px',
-                    color: 'var(--noesis-text-primary, #cdd6f4)',
+                    color: 'var(--noesis-text-primary)',
                     fontSize: '11.5px',
                     lineHeight: '1.5',
                     fontFamily: 'var(--noesis-font-mono, monospace)',
@@ -869,9 +1067,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* L0 Locked Rules Accordion */}
               <div
                 style={{
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
+                  background: 'var(--noesis-bg-base)',
                   borderRadius: 'var(--noesis-radius-md, 8px)',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   overflow: 'hidden',
                 }}
               >
@@ -885,14 +1083,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     justifyContent: 'space-between',
                     background: 'transparent',
                     border: 'none',
-                    color: 'var(--noesis-text-muted, #a6adc8)',
+                    color: 'var(--noesis-text-muted)',
                     fontSize: '11.5px',
                     fontWeight: 600,
                     cursor: 'pointer',
                   }}
                 >
                   <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Lock size={13} color="var(--noesis-accent-peach, #fab387)" />
+                    <Lock size={13} color="var(--noesis-accent-peach)" />
                     L0 · 系统级锁定铁律 (安全/Schema/P0 - 只读保护)
                   </span>
                   <span>{showLockedRules ? '收起 ▲' : '展开查看 ▼'}</span>
@@ -901,10 +1099,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div
                     style={{
                       padding: '10px 12px',
-                      borderTop: '1px solid var(--noesis-bg-surface0, #313244)',
-                      background: 'var(--noesis-bg-crust, #11111b)',
+                      borderTop: '1px solid var(--noesis-bg-surface0)',
+                      background: 'var(--noesis-bg-crust)',
                       fontSize: '11px',
-                      color: 'var(--noesis-text-subtle, #6c7086)',
+                      color: 'var(--noesis-text-subtle)',
                       lineHeight: '1.5',
                       maxHeight: '180px',
                       overflowY: 'auto',
@@ -922,25 +1120,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {effectivePreview && (
                 <div
                   style={{
-                    background: 'var(--noesis-bg-base, #1e1e2e)',
+                    background: 'var(--noesis-bg-base)',
                     borderRadius: 'var(--noesis-radius-md, 8px)',
                     padding: '10px 12px',
-                    border: '1px solid var(--noesis-bg-surface0, #313244)',
+                    border: '1px solid var(--noesis-bg-surface0)',
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
                     fontSize: '11px',
-                    color: 'var(--noesis-text-muted, #a6adc8)',
+                    color: 'var(--noesis-text-muted)',
                   }}
                 >
                   <span>
                     完整组装提示词预期预算消耗:{' '}
-                    <strong style={{ color: 'var(--noesis-accent-green, #a6e3a1)' }}>
+                    <strong style={{ color: 'var(--noesis-accent-green)' }}>
                       ~{effectivePreview.token_estimate} tokens
                     </strong>{' '}
                     (L1: {effectivePreview.l1_persona.length} 字符 · L0: {effectivePreview.l0_locked.length} 字符)
                   </span>
-                  <span style={{ color: 'var(--noesis-accent-blue, #89b4fa)', fontSize: '10.5px' }}>
+                  <span style={{ color: 'var(--noesis-accent-blue)', fontSize: '10.5px' }}>
                     已自动对接质量门禁
                   </span>
                 </div>
@@ -950,21 +1148,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {feedbackStats && (
                 <div
                   style={{
-                    background: 'var(--noesis-bg-base, #1e1e2e)',
+                    background: 'var(--noesis-bg-base)',
                     borderRadius: 'var(--noesis-radius-md, 8px)',
                     padding: '10px 14px',
-                    border: '1px solid var(--noesis-bg-surface0, #313244)',
+                    border: '1px solid var(--noesis-bg-surface0)',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', fontWeight: 600, color: 'var(--noesis-accent-teal, #94e2d5)', marginBottom: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', fontWeight: 600, color: 'var(--noesis-accent-teal)', marginBottom: '6px' }}>
                     <TrendingUp size={13} />
                     本地评测基线与用户反馈统计 (F7-a)
                   </div>
-                  <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)' }}>
+                  <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--noesis-text-muted)' }}>
                     <span>总收集反馈: <strong>{feedbackStats.total}</strong> 条</span>
-                    <span>有用数: <strong style={{ color: 'var(--noesis-accent-green, #a6e3a1)' }}>{feedbackStats.helpful}</strong></span>
-                    <span>太泛率: <strong style={{ color: feedbackStats.too_generic_rate > 0.3 ? 'var(--noesis-accent-peach, #fab387)' : 'var(--noesis-text-primary, #cdd6f4)' }}>{(feedbackStats.too_generic_rate * 100).toFixed(1)}%</strong></span>
-                    <span>有误率: <strong style={{ color: feedbackStats.wrong_rate > 0.1 ? 'var(--noesis-accent-red, #f38ba8)' : 'var(--noesis-text-primary, #cdd6f4)' }}>{(feedbackStats.wrong_rate * 100).toFixed(1)}%</strong></span>
+                    <span>有用数: <strong style={{ color: 'var(--noesis-accent-green)' }}>{feedbackStats.helpful}</strong></span>
+                    <span>太泛率: <strong style={{ color: feedbackStats.too_generic_rate > 0.3 ? 'var(--noesis-accent-peach)' : 'var(--noesis-text-primary)' }}>{(feedbackStats.too_generic_rate * 100).toFixed(1)}%</strong></span>
+                    <span>有误率: <strong style={{ color: feedbackStats.wrong_rate > 0.1 ? 'var(--noesis-accent-red)' : 'var(--noesis-text-primary)' }}>{(feedbackStats.wrong_rate * 100).toFixed(1)}%</strong></span>
                   </div>
                 </div>
               )}
@@ -976,18 +1174,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div
           style={{
             padding: '12px 18px',
-            borderTop: '1px solid var(--noesis-bg-surface0, #313244)',
+            borderTop: '1px solid var(--noesis-bg-surface0)',
             display: 'flex',
             justifyContent: 'flex-end',
-            background: 'var(--noesis-bg-crust, #11111b)',
+            background: 'var(--noesis-bg-crust)',
           }}
         >
           <button
             onClick={onClose}
             style={{
               padding: '6px 16px',
-              background: 'var(--noesis-accent-blue, #89b4fa)',
-              color: 'var(--noesis-bg-crust, #11111b)',
+              background: 'var(--noesis-accent-blue)',
+              color: 'var(--noesis-bg-crust)',
               border: 'none',
               borderRadius: 'var(--noesis-radius-sm, 6px)',
               fontSize: '12.5px',

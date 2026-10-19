@@ -21,7 +21,7 @@ import {
   Clock,
   SkipForward,
 } from 'lucide-react';
-import { FileNode, GraphEdge, GraphEntity, ProjectMap, ReadingStepStatus } from '../types';
+import { FileNode, GraphEdge, GraphEntity, IndexStatus, ProjectMap, ReadingStepStatus } from '../types';
 import { ApiService } from '../services/api';
 
 interface ProjectSidebarProps {
@@ -31,7 +31,10 @@ interface ProjectSidebarProps {
   onSelectFile: (filePath: string, line?: number) => void;
   onOpenProject: () => void;
   onTriggerIndex: () => void;
+  onCancelIndex?: () => void;
   isIndexing: boolean;
+  /** H2: 索引进度（running / processed / total / phase） */
+  indexStatus?: IndexStatus | null;
   indexError?: string | null;
   lastIndexedAt?: string | null;
 }
@@ -41,22 +44,22 @@ type MapSubView = 'modules' | 'calls' | 'ros2' | 'llm_app';
 const STAGE_LABELS: Record<string, { title: string; color: string; bg: string }> = {
   stage_1_entry: {
     title: '阶段 1 · 入口与启动层 (Entry & Launch)',
-    color: '#f9e2af',
+    color: 'var(--noesis-accent-yellow)',
     bg: 'rgba(249, 226, 175, 0.14)',
   },
   stage_2_backbone: {
     title: '阶段 2 · 核心协调与主干循环 (Core Backbone)',
-    color: '#89b4fa',
+    color: 'var(--noesis-accent-blue)',
     bg: 'rgba(137, 180, 250, 0.14)',
   },
   stage_3_domain: {
     title: '阶段 3 · 关键业务与通信节点 (Domain & Comm)',
-    color: '#cba6f7',
+    color: 'var(--noesis-accent-mauve)',
     bg: 'rgba(203, 166, 247, 0.14)',
   },
   stage_4_leaf: {
     title: '阶段 4 · 底层工具与数据结构 (Leaf & Types)',
-    color: '#a6e3a1',
+    color: 'var(--noesis-accent-green)',
     bg: 'rgba(166, 227, 161, 0.14)',
   },
 };
@@ -68,7 +71,9 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   onSelectFile,
   onOpenProject,
   onTriggerIndex,
+  onCancelIndex,
   isIndexing,
+  indexStatus,
   indexError,
   lastIndexedAt,
 }) => {
@@ -178,21 +183,21 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
               padding: '4px 8px',
               borderRadius: '4px',
               cursor: 'pointer',
-              color: '#cdd6f4',
+              color: 'var(--noesis-text-primary)',
               fontSize: '13px',
               userSelect: 'none',
               background: 'transparent',
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#313244')}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--noesis-bg-surface0)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
           >
-            {isExpanded ? <ChevronDown size={14} color="#a6adc8" /> : <ChevronRight size={14} color="#a6adc8" />}
-            {isExpanded ? <FolderOpen size={16} color="#89b4fa" /> : <Folder size={16} color="#89b4fa" />}
+            {isExpanded ? <ChevronDown size={14} color="var(--noesis-text-muted)" /> : <ChevronRight size={14} color="var(--noesis-text-muted)" />}
+            {isExpanded ? <FolderOpen size={16} color="var(--noesis-accent-blue)" /> : <Folder size={16} color="var(--noesis-accent-blue)" />}
             <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {node.name}
             </span>
             {loadingDirs[node.path] && (
-              <span style={{ fontSize: '10px', color: '#6c7086', marginLeft: 'auto' }}>加载中...</span>
+              <span style={{ fontSize: '10px', color: 'var(--noesis-text-subtle)', marginLeft: 'auto' }}>加载中...</span>
             )}
           </div>
 
@@ -215,23 +220,23 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
           padding: '4px 8px',
           borderRadius: '4px',
           cursor: 'pointer',
-          color: isCurrent ? '#89b4fa' : '#a6adc8',
+          color: isCurrent ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-muted)',
           background: isCurrent ? 'rgba(137, 180, 250, 0.15)' : 'transparent',
-          borderLeft: isCurrent ? '2px solid #89b4fa' : '2px solid transparent',
+          borderLeft: isCurrent ? '2px solid var(--noesis-accent-blue)' : '2px solid transparent',
           fontSize: '12.5px',
           userSelect: 'none',
         }}
         onMouseEnter={(e) => {
-          if (!isCurrent) e.currentTarget.style.background = '#313244';
+          if (!isCurrent) e.currentTarget.style.background = 'var(--noesis-bg-surface0)';
         }}
         onMouseLeave={(e) => {
           if (!isCurrent) e.currentTarget.style.background = 'transparent';
         }}
       >
         {node.language === 'markdown' ? (
-          <FileText size={15} color="#fab387" />
+          <FileText size={15} color="var(--noesis-accent-peach)" />
         ) : (
-          <FileCode size={15} color="#a6e3a1" />
+          <FileCode size={15} color="var(--noesis-accent-green)" />
         )}
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
       </div>
@@ -277,8 +282,8 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
           fontSize: '9.5px',
           padding: '1px 5px',
           borderRadius: '3px',
-          border: isHeuristic ? '1px dashed #f9e2af' : '1px solid rgba(166, 227, 161, 0.3)',
-          color: isHeuristic ? '#f9e2af' : '#a6e3a1',
+          border: isHeuristic ? '1px dashed var(--noesis-accent-yellow)' : '1px solid rgba(166, 227, 161, 0.3)',
+          color: isHeuristic ? 'var(--noesis-accent-yellow)' : 'var(--noesis-accent-green)',
           background: isHeuristic ? 'rgba(249, 226, 175, 0.08)' : 'rgba(166, 227, 161, 0.08)',
         }}
       >
@@ -303,20 +308,20 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
         onClick={() => onSelectFile(ent.file_path, ent.line_start)}
         style={{
           padding: '7px 9px',
-          background: '#1e1e2e',
-          border: conf === 'heuristic' ? '1px dashed #45475a' : '1px solid #313244',
+          background: 'var(--noesis-bg-base)',
+          border: conf === 'heuristic' ? '1px dashed var(--noesis-bg-surface1)' : '1px solid var(--noesis-bg-surface0)',
           borderLeft: `3px solid ${accentColor}`,
           borderRadius: '5px',
           cursor: 'pointer',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
-          <span style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4', wordBreak: 'break-all' }}>
+          <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)', wordBreak: 'break-all' }}>
             {ent.name}
           </span>
           {renderConfidenceBadge(conf)}
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', fontSize: '10.5px', color: '#6c7086' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', fontSize: '10.5px', color: 'var(--noesis-text-subtle)' }}>
           <span>
             {ent.file_path}:{ent.line_start}
           </span>
@@ -333,29 +338,29 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        background: '#181825',
-        borderRight: '1px solid #313244',
+        background: 'var(--noesis-bg-mantle)',
+        borderRight: '1px solid var(--noesis-bg-surface0)',
       }}
     >
       {/* Top Header / Project Info */}
       <div
         style={{
           padding: '12px 14px',
-          borderBottom: '1px solid #313244',
+          borderBottom: '1px solid var(--noesis-bg-surface0)',
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
         }}
       >
         <div style={{ overflow: 'hidden' }}>
-          <div style={{ fontSize: '11px', color: '#6c7086', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          <div style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             项目工作区
           </div>
           <div
             style={{
               fontSize: '14px',
               fontWeight: 600,
-              color: '#cdd6f4',
+              color: 'var(--noesis-text-primary)',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -373,15 +378,15 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
             alignItems: 'center',
             gap: '4px',
             padding: '5px 8px',
-            background: '#313244',
-            color: '#cdd6f4',
+            background: 'var(--noesis-bg-surface0)',
+            color: 'var(--noesis-text-primary)',
             border: '1px solid rgba(255,255,255,0.08)',
             borderRadius: '5px',
             fontSize: '11px',
             cursor: 'pointer',
           }}
         >
-          <FolderPlus size={14} color="#89b4fa" />
+          <FolderPlus size={14} color="var(--noesis-accent-blue)" />
           导入
         </button>
       </div>
@@ -390,8 +395,8 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
       <div
         style={{
           display: 'flex',
-          background: '#11111b',
-          borderBottom: '1px solid #313244',
+          background: 'var(--noesis-bg-crust)',
+          borderBottom: '1px solid var(--noesis-bg-surface0)',
         }}
       >
         {[
@@ -412,10 +417,10 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '5px',
-                background: isActive ? '#181825' : 'transparent',
-                color: isActive ? '#89b4fa' : '#6c7086',
+                background: isActive ? 'var(--noesis-bg-mantle)' : 'transparent',
+                color: isActive ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-subtle)',
                 border: 'none',
-                borderBottom: isActive ? '2px solid #89b4fa' : '2px solid transparent',
+                borderBottom: isActive ? '2px solid var(--noesis-accent-blue)' : '2px solid transparent',
                 fontSize: '12px',
                 fontWeight: isActive ? 600 : 400,
                 cursor: 'pointer',
@@ -438,14 +443,14 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   gap: '6px',
-                  background: '#11111b',
-                  border: '1px solid #313244',
+                  background: 'var(--noesis-bg-crust)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   borderRadius: '5px',
                   padding: '4px 8px',
                   marginBottom: '8px',
                 }}
               >
-                <Search size={13} color="#6c7086" />
+                <Search size={13} color="var(--noesis-text-subtle)" />
                 <input
                   type="text"
                   value={fileFilter}
@@ -456,7 +461,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                     background: 'transparent',
                     border: 'none',
                     outline: 'none',
-                    color: '#cdd6f4',
+                    color: 'var(--noesis-text-primary)',
                     fontSize: '11.5px',
                   }}
                 />
@@ -466,7 +471,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
             {currentProject?.children ? (
               currentProject.children.map((child) => renderFileNode(child, 0))
             ) : (
-              <div style={{ padding: '24px 12px', textAlign: 'center', color: '#6c7086', fontSize: '13px' }}>
+              <div style={{ padding: '24px 12px', textAlign: 'center', color: 'var(--noesis-text-subtle)', fontSize: '13px' }}>
                 <Folder size={32} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
                 尚未导入任何项目目录。<br />
                 点击上方「导入」即可开始。
@@ -478,30 +483,82 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
         {activeTab === 'map' && (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-              <span style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4' }}>
+              <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>
                 代码与领域拓扑图
               </span>
-              <button
-                onClick={onTriggerIndex}
-                disabled={isIndexing}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  padding: '4px 8px',
-                  background: isIndexing ? '#45475a' : '#89b4fa',
-                  color: isIndexing ? '#a6adc8' : '#11111b',
-                  border: 'none',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  cursor: isIndexing ? 'default' : 'pointer',
-                }}
-              >
-                <RefreshCw size={12} className={isIndexing ? 'spin' : ''} />
-                {isIndexing ? '增量索引中...' : '增量更新索引'}
-              </button>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  onClick={onTriggerIndex}
+                  disabled={isIndexing}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '4px 8px',
+                    background: isIndexing ? 'var(--noesis-bg-surface1)' : 'var(--noesis-accent-blue)',
+                    color: isIndexing ? 'var(--noesis-text-muted)' : 'var(--noesis-bg-crust)',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: isIndexing ? 'default' : 'pointer',
+                  }}
+                >
+                  <RefreshCw size={12} className={isIndexing ? 'spin' : ''} />
+                  {isIndexing ? '索引中...' : '增量更新索引'}
+                </button>
+                {isIndexing && onCancelIndex && (
+                  <button
+                    onClick={onCancelIndex}
+                    title="取消当前索引"
+                    style={{
+                      padding: '4px 8px',
+                      background: 'transparent',
+                      color: 'var(--noesis-accent-red)',
+                      border: '1px solid var(--noesis-accent-red)',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    取消
+                  </button>
+                )}
+              </div>
             </div>
+
+            {/* H2-4: 索引进度条 */}
+            {isIndexing && (
+              <div style={{ marginBottom: '10px' }}>
+                <div
+                  style={{
+                    height: '6px',
+                    borderRadius: '3px',
+                    background: 'var(--noesis-bg-surface0)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      height: '100%',
+                      width: `${
+                        indexStatus && indexStatus.total > 0
+                          ? Math.min(100, Math.round((indexStatus.processed / indexStatus.total) * 100))
+                          : 8
+                      }%`,
+                      background: 'var(--noesis-accent-blue)',
+                      transition: 'width 0.3s ease',
+                    }}
+                  />
+                </div>
+                <div style={{ fontSize: '10.5px', color: 'var(--noesis-text-subtle)', marginTop: '3px' }}>
+                  {indexStatus && indexStatus.total > 0
+                    ? `已处理 ${indexStatus.processed} / ${indexStatus.total} 个文件`
+                    : '正在扫描文件…'}
+                  {indexStatus?.phase === 'finalizing' ? '（收尾中）' : ''}
+                </div>
+              </div>
+            )}
 
             {indexError && (
               <div
@@ -511,7 +568,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   borderRadius: '6px',
                   background: 'rgba(243, 139, 168, 0.14)',
                   border: '1px solid rgba(243, 139, 168, 0.4)',
-                  color: '#f38ba8',
+                  color: 'var(--noesis-accent-red)',
                   fontSize: '11px',
                 }}
               >
@@ -526,7 +583,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   marginBottom: '8px',
                   borderRadius: '4px',
                   background: 'rgba(166, 227, 161, 0.1)',
-                  color: '#a6e3a1',
+                  color: 'var(--noesis-accent-green)',
                   fontSize: '10.5px',
                 }}
               >
@@ -545,21 +602,21 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                     marginBottom: '10px',
                   }}
                 >
-                  <div style={{ background: '#313244', padding: '6px 8px', borderRadius: '6px' }}>
-                    <div style={{ fontSize: '10px', color: '#a6adc8' }}>符号总数</div>
-                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#89b4fa' }}>
+                  <div style={{ background: 'var(--noesis-bg-surface0)', padding: '6px 8px', borderRadius: '6px' }}>
+                    <div style={{ fontSize: '10px', color: 'var(--noesis-text-muted)' }}>符号总数</div>
+                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: 'var(--noesis-accent-blue)' }}>
                       {projectMap.total_symbols}
                     </div>
                   </div>
-                  <div style={{ background: '#313244', padding: '6px 8px', borderRadius: '6px' }}>
-                    <div style={{ fontSize: '10px', color: '#a6adc8' }}>领域实体</div>
-                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#cba6f7' }}>
+                  <div style={{ background: 'var(--noesis-bg-surface0)', padding: '6px 8px', borderRadius: '6px' }}>
+                    <div style={{ fontSize: '10px', color: 'var(--noesis-text-muted)' }}>领域实体</div>
+                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: 'var(--noesis-accent-mauve)' }}>
                       {projectMap.entities?.length || 0}
                     </div>
                   </div>
-                  <div style={{ background: '#313244', padding: '6px 8px', borderRadius: '6px' }}>
-                    <div style={{ fontSize: '10px', color: '#a6adc8' }}>关系边数</div>
-                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#a6e3a1' }}>
+                  <div style={{ background: 'var(--noesis-bg-surface0)', padding: '6px 8px', borderRadius: '6px' }}>
+                    <div style={{ fontSize: '10px', color: 'var(--noesis-text-muted)' }}>关系边数</div>
+                    <div style={{ fontSize: '15px', fontWeight: 'bold', color: 'var(--noesis-accent-green)' }}>
                       {projectMap.edges?.length || 0}
                     </div>
                   </div>
@@ -586,7 +643,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           borderRadius: '4px',
                           fontWeight: 600,
                           background: dom === 'ros2' ? 'rgba(137, 180, 250, 0.2)' : 'rgba(203, 166, 247, 0.2)',
-                          color: dom === 'ros2' ? '#89b4fa' : '#cba6f7',
+                          color: dom === 'ros2' ? 'var(--noesis-accent-blue)' : 'var(--noesis-accent-mauve)',
                         }}
                       >
                         {dom === 'ros2' ? '🤖 ROS2 工程' : '🧠 LLM 应用'}
@@ -599,7 +656,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                       alignItems: 'center',
                       gap: '4px',
                       fontSize: '10.5px',
-                      color: '#a6adc8',
+                      color: 'var(--noesis-text-muted)',
                       cursor: 'pointer',
                     }}
                   >
@@ -618,7 +675,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                     display: 'grid',
                     gridTemplateColumns: 'repeat(4, 1fr)',
                     gap: '4px',
-                    background: '#11111b',
+                    background: 'var(--noesis-bg-crust)',
                     padding: '4px',
                     borderRadius: '6px',
                     marginBottom: '12px',
@@ -647,8 +704,8 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           borderRadius: '4px',
                           border: 'none',
                           cursor: 'pointer',
-                          background: active ? '#313244' : 'transparent',
-                          color: active ? '#cdd6f4' : '#6c7086',
+                          background: active ? 'var(--noesis-bg-surface0)' : 'transparent',
+                          color: active ? 'var(--noesis-text-primary)' : 'var(--noesis-text-subtle)',
                         }}
                       >
                         <VIcon size={11} />
@@ -661,7 +718,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 {/* Subview 1: Modules & Entrypoints */}
                 {mapSubView === 'modules' && (
                   <div>
-                    <div style={{ fontSize: '11px', fontWeight: 600, color: '#cdd6f4', marginBottom: '6px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-text-primary)', marginBottom: '6px' }}>
                       🚀 识别系统入口 ({projectMap.entry_points.length})
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '14px' }}>
@@ -671,11 +728,11 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           onClick={() => onSelectFile(ep)}
                           style={{
                             padding: '6px 8px',
-                            background: '#313244',
-                            borderLeft: '3px solid #f9e2af',
+                            background: 'var(--noesis-bg-surface0)',
+                            borderLeft: '3px solid var(--noesis-accent-yellow)',
                             borderRadius: '4px',
                             fontSize: '11.5px',
-                            color: '#f9e2af',
+                            color: 'var(--noesis-accent-yellow)',
                             cursor: 'pointer',
                             display: 'flex',
                             alignItems: 'center',
@@ -688,7 +745,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                       ))}
                     </div>
 
-                    <div style={{ fontSize: '11px', fontWeight: 600, color: '#cdd6f4', marginBottom: '6px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-text-primary)', marginBottom: '6px' }}>
                       📦 代码包与模块 ({projectMap.modules.length})
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -698,19 +755,19 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           onClick={() => onSelectFile(mod.path)}
                           style={{
                             padding: '8px',
-                            background: '#1e1e2e',
-                            border: '1px solid #313244',
+                            background: 'var(--noesis-bg-base)',
+                            border: '1px solid var(--noesis-bg-surface0)',
                             borderRadius: '6px',
                             cursor: 'pointer',
                           }}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4' }}>{mod.name}</span>
+                            <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>{mod.name}</span>
                             <span
                               style={{
                                 fontSize: '10px',
-                                background: '#313244',
-                                color: mod.kind === 'ros2_package' ? '#89b4fa' : '#a6adc8',
+                                background: 'var(--noesis-bg-surface0)',
+                                color: mod.kind === 'ros2_package' ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-muted)',
                                 padding: '2px 5px',
                                 borderRadius: '3px',
                               }}
@@ -718,7 +775,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                               {mod.kind === 'ros2_package' ? 'ROS2 Pkg' : `${mod.symbols_count} 符号`}
                             </span>
                           </div>
-                          <div style={{ fontSize: '10.5px', color: '#6c7086', marginTop: '3px' }}>{mod.path}</div>
+                          <div style={{ fontSize: '10.5px', color: 'var(--noesis-text-subtle)', marginTop: '3px' }}>{mod.path}</div>
                         </div>
                       ))}
                     </div>
@@ -728,7 +785,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 {/* Subview 2: Call & Inheritance Graph */}
                 {mapSubView === 'calls' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <div style={{ fontSize: '11px', fontWeight: 600, color: '#cdd6f4', marginBottom: '2px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-text-primary)', marginBottom: '2px' }}>
                       🔗 调用与继承边 ({filteredEdges.filter((e) => e.kind === 'calls' || e.kind === 'inherits').length})
                     </div>
                     {filteredEdges
@@ -740,20 +797,20 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           onClick={() => onSelectFile(edge.file_path, edge.line)}
                           style={{
                             padding: '7px 8px',
-                            background: '#1e1e2e',
-                            border: edge.confidence === 'heuristic' ? '1px dashed #45475a' : '1px solid #313244',
+                            background: 'var(--noesis-bg-base)',
+                            border: edge.confidence === 'heuristic' ? '1px dashed var(--noesis-bg-surface1)' : '1px solid var(--noesis-bg-surface0)',
                             borderRadius: '5px',
                             cursor: 'pointer',
                             fontSize: '11.5px',
                           }}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ color: '#89b4fa', fontWeight: 600 }}>
+                            <span style={{ color: 'var(--noesis-accent-blue)', fontWeight: 600 }}>
                               {edge.kind === 'inherits' ? '继承' : '调用'} → {edge.dst_id.split(':').pop()}
                             </span>
                             {renderConfidenceBadge(edge.confidence)}
                           </div>
-                          <div style={{ fontSize: '10.5px', color: '#6c7086', marginTop: '3px' }}>
+                          <div style={{ fontSize: '10.5px', color: 'var(--noesis-text-subtle)', marginTop: '3px' }}>
                             {edge.file_path}:{edge.line}
                           </div>
                         </div>
@@ -765,24 +822,24 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 {mapSubView === 'ros2' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     {ros2Entities.length === 0 ? (
-                      <div style={{ padding: '16px 8px', textAlign: 'center', color: '#6c7086', fontSize: '12px' }}>
+                      <div style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                         当前工作区未检测到 ROS2 节点或接口定义。
                       </div>
                     ) : (
                       <>
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#89b4fa', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-blue)', marginBottom: '5px' }}>
                             🤖 ROS2 节点 (Nodes: {ros2Entities.filter((e) => e.kind === 'ros2_node').length})
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             {ros2Entities
                               .filter((e) => e.kind === 'ros2_node')
-                              .map((e) => renderEntityCard(e, '#89b4fa'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-blue)'))}
                           </div>
                         </div>
 
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#a6e3a1', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-green)', marginBottom: '5px' }}>
                             📡 话题、服务与参数 (Topics / Services / Params:{' '}
                             {
                               ros2Entities.filter((e) =>
@@ -795,12 +852,12 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                               .filter((e) =>
                                 ['ros2_topic', 'ros2_service', 'ros2_action', 'ros2_param', 'ros2_timer'].includes(e.kind)
                               )
-                              .map((e) => renderEntityCard(e, '#a6e3a1'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-green)'))}
                           </div>
                         </div>
 
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#f9e2af', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-yellow)', marginBottom: '5px' }}>
                             🚀 Launch 启动文件与消息接口 (Launches & Interfaces:{' '}
                             {
                               ros2Entities.filter(
@@ -813,7 +870,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                               .filter(
                                 (e) => e.kind === 'ros2_launch' || e.kind.startsWith('ros2_interface') || e.kind.startsWith('urdf_')
                               )
-                              .map((e) => renderEntityCard(e, '#f9e2af'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-yellow)'))}
                           </div>
                         </div>
                       </>
@@ -825,35 +882,35 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 {mapSubView === 'llm_app' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     {llmEntities.length === 0 ? (
-                      <div style={{ padding: '16px 8px', textAlign: 'center', color: '#6c7086', fontSize: '12px' }}>
+                      <div style={{ padding: '16px 8px', textAlign: 'center', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                         当前工作区未检测到 LLM 客户端、Prompt 或 Agent 编排。
                       </div>
                     ) : (
                       <>
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#cba6f7', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-mauve)', marginBottom: '5px' }}>
                             🔌 LLM 客户端与调用点 ({llmEntities.filter((e) => e.kind === 'llm_client' || e.kind === 'llm_call').length})
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             {llmEntities
                               .filter((e) => e.kind === 'llm_client' || e.kind === 'llm_call')
-                              .map((e) => renderEntityCard(e, '#cba6f7'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-mauve)'))}
                           </div>
                         </div>
 
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#f9e2af', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-yellow)', marginBottom: '5px' }}>
                             📝 Prompt 模板与工具定义 ({llmEntities.filter((e) => e.kind === 'prompt_template' || e.kind === 'tool_def').length})
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                             {llmEntities
                               .filter((e) => e.kind === 'prompt_template' || e.kind === 'tool_def')
-                              .map((e) => renderEntityCard(e, '#f9e2af'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-yellow)'))}
                           </div>
                         </div>
 
                         <div>
-                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#89b4fa', marginBottom: '5px' }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-blue)', marginBottom: '5px' }}>
                             🔄 Agent 编排 / 入口 / 配置项 (
                             {llmEntities.filter((e) => ['agent_workflow', 'llm_entrypoint', 'config_key', 'rag_pipeline'].includes(e.kind)).length})
                           </div>
@@ -862,7 +919,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                               .filter((e) =>
                                 ['agent_workflow', 'llm_entrypoint', 'config_key', 'rag_pipeline'].includes(e.kind)
                               )
-                              .map((e) => renderEntityCard(e, '#89b4fa'))}
+                              .map((e) => renderEntityCard(e, 'var(--noesis-accent-blue)'))}
                           </div>
                         </div>
                       </>
@@ -871,7 +928,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 )}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '24px 8px', color: '#6c7086', fontSize: '12px' }}>
+              <div style={{ textAlign: 'center', padding: '24px 8px', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                 尚未计算项目拓扑。<br />
                 点击上方「增量更新索引」即可生成。
               </div>
@@ -883,11 +940,11 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
           <div>
             <div style={{ marginBottom: '10px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: '12px', fontWeight: 600, color: '#cdd6f4' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>
                   4 阶段结构化阅读路线
                 </span>
                 {routeProgressStats.total > 0 && (
-                  <span style={{ fontSize: '11px', color: '#a6e3a1', fontWeight: 600 }}>
+                  <span style={{ fontSize: '11px', color: 'var(--noesis-accent-green)', fontWeight: 600 }}>
                     已掌握 {routeProgressStats.doneCount} / {routeProgressStats.total}
                   </span>
                 )}
@@ -897,7 +954,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   style={{
                     width: '100%',
                     height: '5px',
-                    background: '#313244',
+                    background: 'var(--noesis-bg-surface0)',
                     borderRadius: '3px',
                     marginTop: '6px',
                     overflow: 'hidden',
@@ -907,7 +964,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                     style={{
                       width: `${Math.round((routeProgressStats.doneCount / routeProgressStats.total) * 100)}%`,
                       height: '100%',
-                      background: '#a6e3a1',
+                      background: 'var(--noesis-accent-green)',
                       transition: 'width 0.25s ease',
                     }}
                   />
@@ -927,7 +984,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   const isReading = status === 'reading';
                   const stageMeta = STAGE_LABELS[item.stage || ''] || {
                     title: item.priority === 1 ? '阶段 1 · 入口启动' : '核心下钻',
-                    color: item.priority === 1 ? '#f9e2af' : '#89b4fa',
+                    color: item.priority === 1 ? 'var(--noesis-accent-yellow)' : 'var(--noesis-accent-blue)',
                     bg: item.priority === 1 ? 'rgba(249, 226, 175, 0.14)' : 'rgba(137, 180, 250, 0.14)',
                   };
 
@@ -940,17 +997,17 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           ? 'rgba(166, 227, 161, 0.06)'
                           : isReading
                           ? 'rgba(137, 180, 250, 0.08)'
-                          : '#1e1e2e',
+                          : 'var(--noesis-bg-base)',
                         border: isDone
                           ? '1px solid rgba(166, 227, 161, 0.25)'
                           : isReading
                           ? '1px solid rgba(137, 180, 250, 0.35)'
-                          : '1px solid #313244',
+                          : '1px solid var(--noesis-bg-surface0)',
                         borderRadius: '6px',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                        <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#89b4fa' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--noesis-accent-blue)' }}>
                           #{item.step}
                         </span>
                         <span
@@ -971,7 +1028,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                         style={{
                           fontSize: '12.5px',
                           fontWeight: 600,
-                          color: '#cdd6f4',
+                          color: 'var(--noesis-text-primary)',
                           marginTop: '6px',
                           cursor: 'pointer',
                         }}
@@ -979,7 +1036,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                         {item.title}
                       </div>
 
-                      <div style={{ fontSize: '11px', color: '#a6adc8', marginTop: '4px', lineHeight: '1.45' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', marginTop: '4px', lineHeight: '1.45' }}>
                         {item.rationale}
                       </div>
 
@@ -990,7 +1047,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                           alignItems: 'center',
                           marginTop: '8px',
                           fontSize: '10px',
-                          color: '#6c7086',
+                          color: 'var(--noesis-text-subtle)',
                         }}
                       >
                         <span>
@@ -1011,10 +1068,10 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                         }}
                       >
                         {[
-                          { id: 'unread', label: '未读', icon: Circle, color: '#6c7086' },
-                          { id: 'reading', label: '阅读中', icon: Clock, color: '#89b4fa' },
-                          { id: 'done', label: '已掌握', icon: CheckCircle, color: '#a6e3a1' },
-                          { id: 'skipped', label: '跳过', icon: SkipForward, color: '#f9e2af' },
+                          { id: 'unread', label: '未读', icon: Circle, color: 'var(--noesis-text-subtle)' },
+                          { id: 'reading', label: '阅读中', icon: Clock, color: 'var(--noesis-accent-blue)' },
+                          { id: 'done', label: '已掌握', icon: CheckCircle, color: 'var(--noesis-accent-green)' },
+                          { id: 'skipped', label: '跳过', icon: SkipForward, color: 'var(--noesis-accent-yellow)' },
                         ].map((opt) => {
                           const SIcon = opt.icon;
                           const active = status === opt.id;
@@ -1032,7 +1089,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                                 borderRadius: '4px',
                                 border: active ? `1px solid ${opt.color}` : '1px solid transparent',
                                 background: active ? 'rgba(255,255,255,0.06)' : 'transparent',
-                                color: active ? opt.color : '#6c7086',
+                                color: active ? opt.color : 'var(--noesis-text-subtle)',
                                 fontSize: '10px',
                                 cursor: 'pointer',
                               }}
@@ -1048,7 +1105,7 @@ export const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                 })}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '24px 8px', color: '#6c7086', fontSize: '12px' }}>
+              <div style={{ textAlign: 'center', padding: '24px 8px', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                 请先在「项目地图」中触发索引以生成 4 阶段阅读路线。
               </div>
             )}

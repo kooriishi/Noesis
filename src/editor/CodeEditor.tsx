@@ -74,6 +74,8 @@ interface CodeEditorProps {
   fontSize?: number;
   fontFamily?: string;
   wordWrap?: boolean;
+  /** H4: 当前配色主题 id，决定编辑器使用哪套高亮主题 */
+  theme?: string;
   jumpToRange?: { filePath: string; startLine: number; endLine: number; nonce: number } | null;
   onContentChange: (newContent: string) => void;
   onSave: (latestContent?: string) => void;
@@ -90,6 +92,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   fontSize = 13.5,
   fontFamily = 'Consolas, "Fira Code", monospace',
   wordWrap = false,
+  theme = 'catppuccin',
   jumpToRange,
   onContentChange,
   onSave,
@@ -154,12 +157,79 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     }
   };
 
+  /** H4: 按当前配色主题返回 CodeMirror 主题扩展（颜色全部取自 CSS 变量）。 */
+  const buildEditorTheme = (themeId: string) => {
+    const palettes: Record<string, { bg: string; fg: string; caret: string; selection: string; gutter: string }> = {
+      catppuccin: {
+        bg: 'var(--noesis-bg-base)',
+        fg: 'var(--noesis-text-primary)',
+        caret: 'var(--noesis-accent-blue)',
+        selection: 'rgba(137, 180, 250, 0.25)',
+        gutter: 'var(--noesis-text-subtle)',
+      },
+      'one-dark': {
+        bg: 'var(--noesis-bg-base)',
+        fg: 'var(--noesis-text-primary)',
+        caret: 'var(--noesis-accent-blue)',
+        selection: 'rgba(97, 175, 239, 0.25)',
+        gutter: 'var(--noesis-text-subtle)',
+      },
+      dracula: {
+        bg: 'var(--noesis-bg-base)',
+        fg: 'var(--noesis-text-primary)',
+        caret: 'var(--noesis-accent-mauve)',
+        selection: 'rgba(189, 147, 249, 0.25)',
+        gutter: 'var(--noesis-text-subtle)',
+      },
+      'tokyo-night': {
+        bg: 'var(--noesis-bg-base)',
+        fg: 'var(--noesis-text-primary)',
+        caret: 'var(--noesis-accent-blue)',
+        selection: 'rgba(122, 162, 247, 0.25)',
+        gutter: 'var(--noesis-text-subtle)',
+      },
+      'catppuccin-latte': {
+        bg: 'var(--noesis-bg-base)',
+        fg: 'var(--noesis-text-primary)',
+        caret: 'var(--noesis-accent-blue)',
+        selection: 'rgba(30, 102, 245, 0.18)',
+        gutter: 'var(--noesis-text-subtle)',
+      },
+    };
+    const palette = palettes[themeId] || palettes.catppuccin;
+    const isLight = themeId === 'catppuccin-latte';
+
+    return [
+      // 浅色主题用 CodeMirror 默认高亮，深色主题沿用 One Dark 的语法着色
+      isLight ? syntaxHighlighting(defaultHighlightStyle, { fallback: true }) : oneDark,
+      EditorView.theme(
+        {
+          '&': { backgroundColor: palette.bg, color: palette.fg },
+          '.cm-content': { caretColor: palette.caret },
+          '.cm-cursor, .cm-dropCursor': { borderLeftColor: palette.caret },
+          '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+            backgroundColor: palette.selection,
+          },
+          '.cm-gutters': {
+            backgroundColor: palette.bg,
+            color: palette.gutter,
+            borderRight: 'none',
+          },
+          '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+          '.cm-activeLine': { backgroundColor: 'rgba(137, 180, 250, 0.06)' },
+        },
+        { dark: !isLight }
+      ),
+    ];
+  };
+
   const buildExtensions = (
     lang: string,
     readOnlyLarge: boolean,
     fSize: number,
     fFamily: string,
-    wrap: boolean
+    wrap: boolean,
+    themeId: string
   ): Extension[] => {
     const saveKeyBinding = keymap.of([
       {
@@ -237,7 +307,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       highlightActiveLine(),
       readOnlyLarge ? EditorState.readOnly.of(true) : [],
       readOnlyLarge ? [] : syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      oneDark,
+      buildEditorTheme(themeId),
       search(),
       getLanguageExtension(lang, readOnlyLarge),
       wrap ? EditorView.lineWrapping : [],
@@ -258,14 +328,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   useEffect(() => {
     if (!editorRef.current) return;
 
-    const configKey = `${language}:${isReadOnlyLargeMode}:${fontSize}:${fontFamily}:${wordWrap}`;
+    const configKey = `${language}:${isReadOnlyLargeMode}:${fontSize}:${fontFamily}:${wordWrap}:${theme}`;
     const cached = editorStateCache.get(filePath);
     const initialState =
       cached && cached.configKey === configKey
         ? cached.state
         : EditorState.create({
             doc: initialContent,
-            extensions: buildExtensions(language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap),
+            extensions: buildExtensions(language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme),
           });
 
     const view = new EditorView({
@@ -303,7 +373,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     if (!view) return;
 
     const prevPath = activePathRef.current;
-    const configKey = `${language}:${isReadOnlyLargeMode}:${fontSize}:${fontFamily}:${wordWrap}`;
+    const configKey = `${language}:${isReadOnlyLargeMode}:${fontSize}:${fontFamily}:${wordWrap}:${theme}`;
 
     if (prevPath) {
       const prevCached = editorStateCache.get(prevPath);
@@ -334,7 +404,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       const nextState = EditorState.create({
         doc: docText,
         selection: prevSelection,
-        extensions: buildExtensions(language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap),
+        extensions: buildExtensions(language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme),
       });
       view.setState(nextState);
       editorStateCache.set(filePath, {
@@ -352,7 +422,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         });
       }
     }
-  }, [filePath, language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap]);
+  }, [filePath, language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme]);
 
   // Support jumping to and highlighting a citation line range with line pulse fade
   useEffect(() => {
@@ -385,7 +455,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   }, [jumpToRange, filePath]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--noesis-bg-base, #1e1e2e)' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--noesis-bg-base)' }}>
       {/* Stage E1 Large File Guard Banner */}
       {isReadOnlyLargeMode && (
         <div
@@ -397,7 +467,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             padding: '6px 14px',
             background: 'rgba(249, 226, 175, 0.14)',
             borderBottom: '1px solid rgba(249, 226, 175, 0.35)',
-            color: 'var(--noesis-accent-yellow, #f9e2af)',
+            color: 'var(--noesis-accent-yellow)',
             fontSize: '11.5px',
             flexShrink: 0,
           }}
@@ -412,8 +482,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             onClick={() => setForceFullEditMap((prev) => ({ ...prev, [filePath]: true }))}
             style={{
               padding: '3px 10px',
-              background: 'var(--noesis-accent-yellow, #f9e2af)',
-              color: 'var(--noesis-bg-crust, #11111b)',
+              background: 'var(--noesis-accent-yellow)',
+              color: 'var(--noesis-bg-crust)',
               border: 'none',
               borderRadius: 'var(--noesis-radius-sm, 4px)',
               fontSize: '11px',
@@ -450,7 +520,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               animation: 'fadeIn var(--noesis-transition-fast, 120ms) ease',
             }}
           >
-            <span style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)', marginRight: '4px', whiteSpace: 'nowrap' }}>
+            <span style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', marginRight: '4px', whiteSpace: 'nowrap' }}>
               已选 {selection.endLine - selection.startLine + 1} 行
             </span>
             <button
@@ -460,8 +530,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: 'var(--noesis-accent-blue, #89b4fa)',
-                color: 'var(--noesis-bg-crust, #11111b)',
+                background: 'var(--noesis-accent-blue)',
+                color: 'var(--noesis-bg-crust)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -481,8 +551,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                   alignItems: 'center',
                   gap: '4px',
                   padding: '5px 10px',
-                  background: 'var(--noesis-accent-mauve, #cba6f7)',
-                  color: 'var(--noesis-bg-crust, #11111b)',
+                  background: 'var(--noesis-accent-mauve)',
+                  color: 'var(--noesis-bg-crust)',
                   border: 'none',
                   borderRadius: '5px',
                   fontSize: '12px',
@@ -502,8 +572,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: 'var(--noesis-accent-red, #f38ba8)',
-                color: 'var(--noesis-bg-crust, #11111b)',
+                background: 'var(--noesis-accent-red)',
+                color: 'var(--noesis-bg-crust)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -522,8 +592,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                 alignItems: 'center',
                 gap: '4px',
                 padding: '5px 10px',
-                background: 'var(--noesis-accent-green, #a6e3a1)',
-                color: 'var(--noesis-bg-crust, #11111b)',
+                background: 'var(--noesis-accent-green)',
+                color: 'var(--noesis-bg-crust)',
                 border: 'none',
                 borderRadius: '5px',
                 fontSize: '12px',
@@ -547,8 +617,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               top: `${Math.min(selection.relTop, 260)}px`,
               left: `${selection.relLeft}px`,
               width: '320px',
-              background: '#181825',
-              border: '1px solid #f38ba8',
+              background: 'var(--noesis-bg-mantle)',
+              border: '1px solid var(--noesis-accent-red)',
               borderRadius: '8px',
               padding: '12px',
               boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
@@ -556,17 +626,17 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#cdd6f4' }}>
+              <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--noesis-text-primary)' }}>
                 标记卡点类别 (针对选区降维重讲)
               </span>
               <button
                 onClick={() => setShowConfusionModal(false)}
-                style={{ background: 'transparent', border: 'none', color: '#6c7086', cursor: 'pointer' }}
+                style={{ background: 'transparent', border: 'none', color: 'var(--noesis-text-subtle)', cursor: 'pointer' }}
               >
                 ✕
               </button>
             </div>
-            <p style={{ fontSize: '11px', color: '#a6adc8', marginBottom: '10px' }}>
+            <p style={{ fontSize: '11px', color: 'var(--noesis-text-muted)', marginBottom: '10px' }}>
               选择你感到困惑的具体维度，系统将根据选区真实代码换用生活类比、最小示例与前置概念深入拆解：
             </p>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
@@ -584,16 +654,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                   }}
                   style={{
                     padding: '8px',
-                    background: '#313244',
+                    background: 'var(--noesis-bg-surface0)',
                     border: '1px solid rgba(255,255,255,0.05)',
                     borderRadius: '6px',
                     textAlign: 'left',
                     cursor: 'pointer',
-                    color: '#cdd6f4',
+                    color: 'var(--noesis-text-primary)',
                   }}
                 >
-                  <div style={{ fontSize: '12px', fontWeight: 600, color: '#f38ba8' }}>{cat.name}</div>
-                  <div style={{ fontSize: '10px', color: '#6c7086' }}>{cat.desc}</div>
+                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-accent-red)' }}>{cat.name}</div>
+                  <div style={{ fontSize: '10px', color: 'var(--noesis-text-subtle)' }}>{cat.desc}</div>
                 </button>
               ))}
             </div>
@@ -608,7 +678,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
               top: '16px',
               right: '24px',
               background: 'rgba(166, 227, 161, 0.95)',
-              color: '#11111b',
+              color: 'var(--noesis-bg-crust)',
               padding: '6px 12px',
               borderRadius: '6px',
               fontSize: '12px',

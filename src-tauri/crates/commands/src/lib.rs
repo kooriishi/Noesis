@@ -1,4 +1,6 @@
+pub mod agent_ask;
 pub mod prompts;
+pub mod settings;
 pub mod sink;
 pub mod state;
 pub mod types;
@@ -39,11 +41,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub use sink::{EventSink, NullEventSink};
-pub use state::{ActiveTaskGuard, AppState, ACTIVE_TASKS, IS_INDEXING};
+pub use settings::{get_recent_projects, get_ui_settings, remember_project, set_ui_settings, UiSettings};
+pub use state::{ActiveTaskGuard, AppState, IndexJob, IndexStatus, ACTIVE_TASKS, IS_INDEXING};
 pub use types::*;
 
 // Re-export prompt constants
 pub use prompts::*;
+
+/// H1: 追加在每一层系统提示词末尾的硬性输出约束，确保模型只产出一层的纯 Markdown。
+pub const SINGLE_LAYER_OUTPUT_CONTRACT: &str = "本次只输出一个层的解读正文，使用纯 Markdown。\n- 不要输出 JSON，不要包 ```json 代码块（除提示词明确要求的逐行注释数组外）。\n- 不要输出其他三层的任何章节。\n- 不要写「好的，下面是……」这类开场白，也不要在结尾写「如需继续」之类的收尾。\n- 不要重复选区代码全文，只在需要对照时引用关键行。";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerExplainResponse {
@@ -54,6 +60,9 @@ pub struct LayerExplainResponse {
     pub concepts: Vec<String>,
     pub cached: bool,
     pub explanation_id: Option<String>,
+    /// H1: 同一选区的四层共享的分组 id，历史卡片档案可整组打开。
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 pub fn supported_commands() -> Vec<&'static str> {
@@ -71,6 +80,8 @@ pub fn supported_commands() -> Vec<&'static str> {
         "read_file",
         "save_file",
         "index_project",
+        "get_index_status",
+        "cancel_index",
         "get_project_map",
         "set_reading_step_status",
         "get_reading_progress",
@@ -79,6 +90,7 @@ pub fn supported_commands() -> Vec<&'static str> {
         "explain_code",
         "explain_selection_structured",
         "explain_layer",
+        "get_explanation_layers",
         "mark_confusion",
         "update_confusion_mark_explanation",
         "resolve_confusion_mark",
@@ -120,6 +132,9 @@ pub fn supported_commands() -> Vec<&'static str> {
         "export_confusion_markdown",
         "submit_explanation_feedback",
         "get_feedback_stats",
+        "get_ui_settings",
+        "set_ui_settings",
+        "get_recent_projects",
     ]
 }
 
@@ -197,11 +212,74 @@ pub async fn send_llm_chat(
 // Project & File Operations
 // -------------------------------------------------------------------------------------------------
 
+/// H2: 明显过大的根目录（家目录 / 文件系统根 / 系统目录）先做拦截，
+/// 避免用户误把整个 `$HOME` 当成项目索引。
+fn is_oversized_root(path: &std::path::Path) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    if canonical.parent().is_none() {
+        // 文件系统根 `/` 或 `C:\`
+        return true;
+    }
+    if let Some(home) = dirs_home() {
+        if canonical == home {
+            return true;
+        }
+    }
+    matches!(
+        canonical.to_string_lossy().replace('\\', "/").as_str(),
+        "/usr" | "/etc" | "/var" | "/opt" | "/lib" | "/bin" | "/sbin" | "/proc" | "/sys"
+    )
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .and_then(|p| std::fs::canonicalize(p).ok())
+}
+
 pub async fn open_project(state: &AppState, path: String) -> Result<FileNode, String> {
-    let pm = ProjectManager::new(&path).map_err(|e| e.to_string())?;
+    let target = std::path::Path::new(&path);
+
+    // H2-6: 拒绝把家目录 / 系统根目录当成项目
+    if is_oversized_root(target) {
+        return Err(format!(
+            "「{}」是系统级大目录（家目录或根目录），不适合作为项目打开。请选择具体的代码仓库目录。",
+            path
+        ));
+    }
+
+    let pm = ProjectManager::new(target).map_err(|e| e.to_string())?;
     let tree = pm.build_tree(2).map_err(|e| e.to_string())?;
-    let mut guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-    *guard = Some(pm);
+    let new_project_id = pm.normalized_root();
+
+    // H2-2: 切换到新项目时，取消上一个项目的索引任务
+    {
+        let job_guard = state.index_job.lock().map_err(|e| e.to_string())?;
+        if let Some(job) = job_guard.as_ref() {
+            if job.project_id != new_project_id {
+                job.request_cancel();
+            }
+        }
+    }
+
+    {
+        let mut guard = state.project_manager.lock().map_err(|e| e.to_string())?;
+        *guard = Some(pm);
+    }
+
+    // 切换项目后，旧项目的地图不再代表当前工作区
+    if let Ok(mut map_guard) = state.project_map.lock() {
+        *map_guard = None;
+    }
+
+    // H2-1: 记住最近打开的项目，下次启动直接恢复（不再默认打开 `./`）
+    if let Ok(canonical) = std::fs::canonicalize(target) {
+        let _ = settings::remember_project(state, &canonical.to_string_lossy()).await;
+    }
+
     Ok(tree)
 }
 
@@ -244,49 +322,134 @@ pub async fn save_file(state: &AppState, path: String, content: String) -> Resul
 }
 
 // -------------------------------------------------------------------------------------------------
-// Indexer Commands (G1 non-blocking + AtomicBool)
+// Indexer Commands (H2: 按项目管理、可取消、带进度)
 // -------------------------------------------------------------------------------------------------
 
+/// H2-4: 查询当前索引进度，前端每秒轮询一次即可显示进度条。
+pub async fn get_index_status(state: &AppState) -> Result<IndexStatus, String> {
+    let job_guard = state.index_job.lock().map_err(|e| e.to_string())?;
+    Ok(match job_guard.as_ref() {
+        Some(job) => job.snapshot(),
+        None => IndexStatus {
+            running: false,
+            project_id: None,
+            processed: 0,
+            total: 0,
+            phase: "idle".to_string(),
+        },
+    })
+}
+
+/// H2-2: 主动取消正在进行的索引。
+pub async fn cancel_index(state: &AppState) -> Result<bool, String> {
+    let job_guard = state.index_job.lock().map_err(|e| e.to_string())?;
+    if let Some(job) = job_guard.as_ref() {
+        job.request_cancel();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn index_project(state: Arc<AppState>) -> Result<ProjectMap, String> {
-    if IS_INDEXING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Err("索引正在进行中，请稍候...".to_string());
-    }
-
-    struct IndexingGuard;
-    impl Drop for IndexingGuard {
-        fn drop(&mut self) {
-            IS_INDEXING.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = IndexingGuard;
-    let _task = ActiveTaskGuard::new();
-
     let (root_path, project_id) = {
         let mgr_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
-        let pm = mgr_guard.as_ref().ok_or("No project opened yet")?;
+        let pm = mgr_guard.as_ref().ok_or("尚未打开任何工程")?;
         (pm.root_path().to_path_buf(), pm.normalized_root())
     };
 
+    // H2-2: 同一项目重复点击不报错，直接返回「已在索引中」；不同项目则取消旧任务。
+    let job = {
+        let mut job_guard = state.index_job.lock().map_err(|e| e.to_string())?;
+        if let Some(existing) = job_guard.as_ref() {
+            if existing.project_id == project_id && !existing.is_cancelled() {
+                return Err(format!(
+                    "INDEX_ALREADY_RUNNING: 项目 {} 的索引正在进行中（已处理 {}/{} 个文件），请等待完成。",
+                    existing.project_id,
+                    existing.processed.load(Ordering::SeqCst),
+                    existing.total.load(Ordering::SeqCst)
+                ));
+            }
+            existing.request_cancel();
+        }
+        let new_job = IndexJob::new(project_id.clone());
+        *job_guard = Some(new_job.clone());
+        new_job
+    };
+    IS_INDEXING.store(true, Ordering::SeqCst);
+
+    struct IndexingGuard(Arc<AppState>);
+    impl Drop for IndexingGuard {
+        fn drop(&mut self) {
+            IS_INDEXING.store(false, Ordering::SeqCst);
+            if let Ok(mut guard) = self.0.index_job.lock() {
+                *guard = None;
+            }
+        }
+    }
+    let _guard = IndexingGuard(Arc::clone(&state));
+    let _task = ActiveTaskGuard::new();
+
     let st = Arc::clone(&state);
+    let job_for_task = job.clone();
+    let project_id_for_task = project_id.clone();
+
     let res = tokio::task::spawn_blocking(move || {
         let _ = st.store.ensure_schema();
         let ros2_adapter = Ros2Adapter::new();
         let llmapp_adapter = LlmAppAdapter::new();
         let adapters: [&dyn DomainAdapter; 2] = [&ros2_adapter, &llmapp_adapter];
 
-        let (map, _report) = st
-            .indexer
-            .index_workspace(&root_path, &st.store, &adapters)
-            .map_err(|e| {
-                let err_str = e.to_string();
-                if err_str.contains("SQLITE_BUSY") || err_str.contains("database is locked") || err_str.to_lowercase().contains("busy") {
-                    "数据库被另一个 Noesis 窗口占用，请关闭其他窗口后重试".to_string()
-                } else {
-                    err_str
-                }
-            })?;
+        job_for_task.set_phase("scanning");
+        let processed = Arc::clone(&job_for_task.processed);
+        let total = Arc::clone(&job_for_task.total);
+        let progress_cb = move |done: usize, all: usize, _rel: &str| {
+            processed.store(done, Ordering::SeqCst);
+            total.store(all, Ordering::SeqCst);
+        };
 
-        refresh_project_exercises_freshness(&root_path, &st.store, &project_id);
+        let indexed = st.indexer.index_workspace_with_progress(
+            &root_path,
+            &st.store,
+            &adapters,
+            Some(job_for_task.cancel.as_ref()),
+            Some(&progress_cb),
+        );
+
+        let (map, _report) = match indexed {
+            Ok(v) => v,
+            Err(noesis_indexer::IndexerError::Cancelled) => {
+                return Err("INDEX_CANCELLED: 索引已取消".to_string());
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("SQLITE_BUSY")
+                    || err_str.contains("database is locked")
+                    || err_str.to_lowercase().contains("busy")
+                {
+                    return Err("数据库被另一个 Noesis 窗口占用，请关闭其他窗口后重试".to_string());
+                }
+                return Err(err_str);
+            }
+        };
+
+        // H2-3: 只写自己项目的地图；项目已被切走或任务被取消时丢弃结果
+        if job_for_task.is_cancelled() {
+            return Err("INDEX_CANCELLED: 索引已取消".to_string());
+        }
+        let still_current = st
+            .project_manager
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|pm| pm.normalized_root()))
+            .map(|current| current == project_id_for_task)
+            .unwrap_or(false);
+        if !still_current {
+            return Err("INDEX_CANCELLED: 项目已切换，本次索引结果已丢弃".to_string());
+        }
+
+        job_for_task.set_phase("finalizing");
+        refresh_project_exercises_freshness(&root_path, &st.store, &project_id_for_task);
         *st.project_map.lock().unwrap() = Some(map.clone());
         Ok::<ProjectMap, String>(map)
     })
@@ -426,6 +589,7 @@ pub async fn explain_selection_structured(
     let effective = state.credentials.resolve_effective_config(&state.credentials.get_config_view());
     let active_preset = state.store.get_active_prompt_preset("explain").ok().flatten();
     let custom_persona = active_preset.map(|p| p.persona_text);
+    let prompt_version = PROMPT_VERSION.to_string();
 
     let estimator = HeuristicTokenEstimator;
     let budget_tokens = if depth_mode.as_deref() == Some("deep") { 24000 } else { 16000 };
@@ -476,6 +640,13 @@ pub async fn explain_selection_structured(
         snippet
     );
 
+    // 旧版流程：显式拼接「四视角 JSON」格式规则（新流程 explain_layer 不再使用它）
+    let sys_prompt = format!("{}
+
+---
+## 锁定格式规则（旧版 JSON 四视角）
+{}", sys_prompt, JSON_V2_RULES_PROMPT);
+
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
@@ -486,6 +657,36 @@ pub async fn explain_selection_structured(
             content: user_prompt,
         },
     ];
+
+    // 旧流程缓存：同一 basis_hash + model + prompt_version 直接复用，force_refresh 为真时跳过
+    if !force_refresh {
+        if let Ok(Some(hit)) = state.store.get_cached_explanation(
+            &pack.basis_hash,
+            &effective.model,
+            &prompt_version,
+        ) {
+            if let Ok(mut exp) = serde_json::from_str::<StructuredExplanation>(&hit.json) {
+                let verification = CitationVerifier::verify(&root_path, &[], &mut exp);
+                let generic_phrases = QualityGate::load_generic_phrases(&root_path);
+                let quality = QualityGate::evaluate(
+                    &exp,
+                    &snippet,
+                    depth_mode.as_deref(),
+                    &generic_phrases,
+                );
+                return Ok(StructuredExplainResponse {
+                    explanation: Some(exp),
+                    verification,
+                    manifest: pack.manifest,
+                    dropped: vec![],
+                    cached: true,
+                    raw_unverified_output: None,
+                    quality: Some(quality),
+                    explanation_id: Some(hit.id),
+                });
+            }
+        }
+    }
 
     let mut effective_with_tokens = effective.clone();
     effective_with_tokens.max_tokens = if depth_mode.as_deref() == Some("deep") { 8192 } else { 4096 };
@@ -502,6 +703,43 @@ pub async fn explain_selection_structured(
     let quality = QualityGate::evaluate(&final_exp, &snippet, depth_mode.as_deref(), &generic_phrases);
 
     let exp_id = format!("exp-{}", Utc::now().timestamp_millis());
+
+    // 旧流程落缓存，历史卡片档案仍可打开
+    let cached_entry = noesis_store::CachedExplanation {
+        id: exp_id.clone(),
+        project_id: project_id.clone(),
+        file_id: file_path.clone(),
+        range: format!("{}-{}", start_line, end_line),
+        basis_hash: pack.basis_hash.clone(),
+        prompt_version: prompt_version.clone(),
+        model: effective.model.clone(),
+        request_kind: "explain_selection_structured".to_string(),
+        json: serde_json::to_string(&final_exp).unwrap_or_default(),
+        stats: serde_json::to_string(&quality).unwrap_or_default(),
+        created_at: Utc::now().timestamp(),
+        title: Some(format!(
+            "四层解读 · {}:L{}-L{}",
+            file_path.rsplit('/').next().unwrap_or(&file_path),
+            start_line,
+            end_line
+        )),
+        file_path: Some(file_path.clone()),
+        selected_preview: Some(snippet.chars().take(240).collect()),
+        pinned: false,
+        deleted: false,
+        depth_mode: depth_mode.clone(),
+        last_opened_at: None,
+        layer: None,
+        markdown: None,
+        citations_json: None,
+        concepts_json: serde_json::to_string(&final_exp.concepts).ok(),
+        quality_json: serde_json::to_string(&quality).ok(),
+        group_id: None,
+    };
+    if let Err(err) = state.store.save_explanation_cache(&cached_entry) {
+        tracing::warn!("explain_selection_structured 缓存写入失败: {}", err);
+    }
+
     Ok(StructuredExplainResponse {
         explanation: Some(final_exp),
         verification: ver_summary,
@@ -514,7 +752,130 @@ pub async fn explain_selection_structured(
     })
 }
 
-/// G3: explain_layer independently handles streaming of one specific layer
+/// 把 Markdown 正文里的 `[L12-L18]` / `[path/to/file.cpp:L40-L52]` 引用标记解析成待核验的
+/// `CitationItem`，交给 `CitationVerifier` 统一核对（真实行号 / 路径逃逸 / 敏感文件）。
+fn extract_markdown_citations(current_file: &str, markdown: &str) -> Vec<CitationItem> {
+    let mut out: Vec<CitationItem> = Vec::new();
+    let bytes: Vec<char> = markdown.chars().collect();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] != '[' {
+            i += 1;
+            continue;
+        }
+        // 找到同一行内的闭合 ']'，避免跨段落误配
+        let mut j = i + 1;
+        let mut closed = None;
+        while j < bytes.len() {
+            let ch = bytes[j];
+            if ch == '\n' || ch == ']' {
+                if ch == ']' {
+                    closed = Some(j);
+                }
+                break;
+            }
+            j += 1;
+        }
+        let Some(close) = closed else {
+            i += 1;
+            continue;
+        };
+        let inner: String = bytes[i + 1..close].iter().collect();
+        let inner = inner.trim();
+
+        // 形状一：L12-L18（当前文件）
+        // 形状二：path/to/file.cpp:L40-L52（其他文件）
+        let (file_part, line_part) = match inner.rfind(':') {
+            Some(pos) if inner[pos + 1..].trim_start().starts_with('L') => {
+                (inner[..pos].trim().to_string(), inner[pos + 1..].trim().to_string())
+            }
+            _ => (String::new(), inner.to_string()),
+        };
+
+        let line_part = line_part.trim_start_matches('L').trim_start_matches('l');
+        let mut nums = line_part.splitn(2, '-');
+        let first = nums.next().and_then(|s| s.trim().parse::<u32>().ok());
+        let second = nums
+            .next()
+            .and_then(|s| s.trim().trim_start_matches('L').parse::<u32>().ok());
+
+        if let Some(start) = first {
+            let end = second.unwrap_or(start);
+            let file = if file_part.is_empty() {
+                current_file.to_string()
+            } else {
+                file_part
+            };
+            if !file.is_empty() && end >= start {
+                // 同一文件同一行段只保留一次
+                if !out
+                    .iter()
+                    .any(|c| c.file == file && c.line_start == start && c.line_end == end)
+                {
+                    out.push(CitationItem {
+                        id: format!("c{}", out.len() + 1),
+                        file,
+                        line_start: start,
+                        line_end: end,
+                        quote: String::new(),
+                        status: String::new(),
+                        corrected_line_start: None,
+                        corrected_line_end: None,
+                        reason: None,
+                    });
+                }
+            }
+        }
+        i = close + 1;
+    }
+
+    // 限制数量，避免超大输出把核验拖慢
+    out.truncate(24);
+    out
+}
+
+/// 引用核验：为每个引用从磁盘真实文件中回填原文片段，再交给 `CitationVerifier`。
+fn verify_markdown_citations(
+    root_path: &std::path::Path,
+    current_file: &str,
+    markdown: &str,
+) -> Vec<CitationItem> {
+    let mut cites = extract_markdown_citations(current_file, markdown);
+    if cites.is_empty() {
+        return cites;
+    }
+
+    // 回填 quote（Verifier 依赖 quote 判断行号是否被偏移过）
+    let canonical_root =
+        std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    for cite in cites.iter_mut() {
+        let rel = cite.file.trim_start_matches('/').to_string();
+        let candidate = canonical_root.join(&rel);
+        if let Ok(content) = std::fs::read_to_string(&candidate) {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = cite.line_start.max(1) as usize;
+            let end = (cite.line_end as usize).min(lines.len());
+            if start <= lines.len() && end >= start {
+                cite.quote = lines[start - 1..end].join("\n");
+            }
+        }
+    }
+
+    let mut exp = StructuredExplanation {
+        citations: cites,
+        ..Default::default()
+    };
+    CitationVerifier::verify(&canonical_root, &[], &mut exp);
+    exp.citations
+}
+
+/// H1: 按层生成一份 Markdown 解读（流式）。
+///
+/// 与旧版 `explain_selection_structured` 的区别：
+/// - 一次只负责一层，系统提示词不再拼接旧版「四视角 JSON」规则；
+/// - 流式把 token 推给前端，结束后推送质检结果；
+/// - 结果按 `basis_hash + layer + model + PROMPT_VERSION` 写入缓存，同一选区的四层共用 `group_id`。
 pub async fn explain_layer(
     state: &AppState,
     layer: String,
@@ -529,6 +890,21 @@ pub async fn explain_layer(
     let is_force = force_refresh.unwrap_or(false);
     let depth_str = depth_mode.unwrap_or_else(|| "standard".to_string());
     let is_deep = depth_str == "deep";
+    let layer_key = layer.to_lowercase();
+
+    let layer_prompt_template = match layer_key.as_str() {
+        "overall" => PROMPT_OVERALL,
+        "logic" => PROMPT_LOGIC,
+        "syntax" => PROMPT_SYNTAX,
+        "principle" => PROMPT_PRINCIPLE,
+        _ => return Err(format!("Unsupported layer: {}", layer)),
+    };
+    let layer_label = match layer_key.as_str() {
+        "overall" => "整体",
+        "logic" => "逻辑",
+        "syntax" => "语法",
+        _ => "原理",
+    };
 
     let (root_path, project_id) = {
         let pm_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
@@ -544,8 +920,10 @@ pub async fn explain_layer(
     let generic_phrases = QualityGate::load_generic_phrases(&root_path);
     let estimator = HeuristicTokenEstimator;
 
+    // 注意：kind 里**不能**带层名。basis_hash 由 kind 参与计算，而同一选区的四层必须共享
+    // 同一个 group_id（历史记录才能整组打开）。层名只参与缓存查询键，不参与分组键。
     let ctx_req = ContextRequest {
-        kind: "explain_selection".to_string(),
+        kind: "explain_layer".to_string(),
         project_id: project_id.clone(),
         file: Some(file.clone()),
         range: Some(range),
@@ -572,32 +950,25 @@ pub async fn explain_layer(
         &effective.model,
     );
 
-    let layer_prompt_template = match layer.to_lowercase().as_str() {
-        "overall" => PROMPT_OVERALL,
-        "logic" => PROMPT_LOGIC,
-        "syntax" => PROMPT_SYNTAX,
-        "principle" => PROMPT_PRINCIPLE,
-        _ => return Err(format!("Unsupported layer: {}", layer)),
-    };
-
-    let max_tokens = match (layer.to_lowercase().as_str(), is_deep) {
-        ("overall", false) => 2048,
-        ("overall", true) => 4096,
-        ("logic", false) => 4096,
+    let max_tokens = match (layer_key.as_str(), is_deep) {
+        ("overall", false) => 4096,
+        ("overall", true) => 6144,
+        ("logic", false) => 6144,
         ("logic", true) => 8192,
-        ("syntax", false) => 6144,
+        ("syntax", false) => 8192,
         ("syntax", true) => 8192,
-        ("principle", false) => 3072,
+        ("principle", false) => 4096,
         ("principle", true) => 6144,
-        _ => 4096,
+        _ => 6144,
     };
 
+    // ---------------------------------------------------------------------------------------------
+    // H1-3: 系统提示词只保留「安全与引用规则 + 人设 + 本层提示词 + 单层硬性要求」。
+    // 不再拼接 code_guide_expert.system.md 与旧版 JSON 四视角规则，避免把模型拉回短输出 / JSON 格式。
+    // ---------------------------------------------------------------------------------------------
     let system_prompt = format!(
-        "{}\n\n---\n## 锁定核心规则\n{}\n\n---\n## 教学风格与规范\n{}\n\n---\n{}",
-        EXPERT_SYSTEM_PROMPT,
-        LOCKED_RULES_PROMPT,
-        DEFAULT_PERSONA_PROMPT,
-        layer_prompt_template
+        "{}\n\n---\n## 教学风格与规范\n{}\n\n---\n## 本次输出要求\n{}\n\n---\n{}",
+        SAFETY_RULES_PROMPT, DEFAULT_PERSONA_PROMPT, SINGLE_LAYER_OUTPUT_CONTRACT, layer_prompt_template
     );
 
     let mut context_chunks = Vec::new();
@@ -608,42 +979,81 @@ pub async fn explain_layer(
     }
 
     let user_prompt = format!(
-        "目标文件: {}\n行号范围: L{}-L{}\n模式: {}\n\n项目上下文信息:\n{}\n\n选区代码:\n```\n{}\n```",
+        "目标文件: {}\n行号范围: L{}-L{}\n模式: {}\n本次只写【{}】层\n\n项目上下文信息:\n{}\n\n选区代码:\n```\n{}\n```",
         file,
         range.0,
         range.1,
         if is_deep { "深度解读 (Deep Mode)" } else { "标准解读 (Standard Mode)" },
+        layer_label,
         context_chunks.join("\n\n"),
         snippet
     );
 
-    let mut effective = state.credentials.resolve_effective_config(&state.credentials.get_config_view());
+    let mut effective = effective.clone();
     effective.max_tokens = max_tokens;
 
-    let system_prompt = format!(
-        "{}\n\n---\n## 锁定核心规则\n{}\n\n---\n## 教学风格与规范\n{}\n\n---\n{}",
-        EXPERT_SYSTEM_PROMPT,
-        LOCKED_RULES_PROMPT,
-        DEFAULT_PERSONA_PROMPT,
-        layer_prompt_template
-    );
+    // ---------------------------------------------------------------------------------------------
+    // H1-4: 缓存命中直接回放（force_refresh 为真时跳过）
+    // ---------------------------------------------------------------------------------------------
+    if !is_force {
+        if let Ok(Some(hit)) = state.store.get_cached_layer(
+            &pack.basis_hash,
+            &layer_key,
+            &effective.model,
+            &prompt_version,
+        ) {
+            if let Some(markdown) = hit.markdown.clone() {
+                let quality = hit
+                    .quality_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str::<LayerQualityReport>(j).ok())
+                    .unwrap_or_else(|| {
+                        QualityGate::evaluate_layer(
+                            &layer_key,
+                            &markdown,
+                            &snippet,
+                            is_deep,
+                            &generic_phrases,
+                        )
+                    });
+                let citations = hit
+                    .citations_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str::<Vec<CitationItem>>(j).ok())
+                    .unwrap_or_default();
+                let concepts = hit
+                    .concepts_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+                    .unwrap_or_default();
 
-    let mut context_chunks = Vec::new();
-    for item in &pack.items {
-        if item.kind != "system_prompt" {
-            context_chunks.push(item.text.clone());
+                if let Some(s) = sink {
+                    let _ = s.send_event(json!({ "type": "token", "layer": layer_key, "token": markdown }));
+                    let _ = s.send_event(json!({
+                        "type": "done",
+                        "layer": layer_key,
+                        "markdown": markdown,
+                        "quality": quality,
+                        "citations": citations,
+                        "concepts": concepts,
+                        "cached": true,
+                        "explanation_id": hit.id,
+                        "group_id": hit.group_id,
+                    }));
+                }
+                return Ok(LayerExplainResponse {
+                    layer: layer_key,
+                    markdown,
+                    quality,
+                    citations,
+                    concepts,
+                    cached: true,
+                    explanation_id: Some(hit.id),
+                    group_id: hit.group_id.clone(),
+                });
+            }
         }
     }
-
-    let user_prompt = format!(
-        "目标文件: {}\n行号范围: L{}-L{}\n模式: {}\n\n项目上下文信息:\n{}\n\n选区代码:\n```\n{}\n```",
-        file,
-        range.0,
-        range.1,
-        if is_deep { "深度解读 (Deep Mode)" } else { "标准解读 (Standard Mode)" },
-        context_chunks.join("\n\n"),
-        snippet
-    );
 
     let messages = vec![
         ChatMessage {
@@ -662,7 +1072,7 @@ pub async fn explain_layer(
             .send_chat_stream(&effective, messages.clone(), |delta| {
                 let _ = s.send_event(json!({
                     "type": "token",
-                    "layer": layer,
+                    "layer": layer_key,
                     "token": delta
                 }));
             })
@@ -677,23 +1087,24 @@ pub async fn explain_layer(
     };
 
     let mut quality = QualityGate::evaluate_layer(
-        &layer,
+        &layer_key,
         &generated_markdown,
         &snippet,
         is_deep,
         &generic_phrases,
     );
 
+    // 质检未通过：带问题清单重试一次（只重试一次，避免无限放大成本）
     if !quality.passed {
         let retry_issues = quality.issues.join("；");
         let retry_user_prompt = format!(
-            "{}\n\n【质检重试指令】上一次输出未通过程序质检，具体问题如下：\n{}\n请严格针对上述问题重新生成完整的 Markdown 解读！",
+            "{}\n\n【质检重试指令】上一次输出未通过程序质检，具体问题如下：\n{}\n请严格针对上述问题重新生成完整的 Markdown 解读，不要输出 JSON，不要解释你在做什么。",
             user_prompt, retry_issues
         );
         let retry_messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: system_prompt,
+                content: system_prompt.clone(),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -702,14 +1113,16 @@ pub async fn explain_layer(
         ];
 
         if let Ok(retry_resp) = state.llm.send_chat(&effective, retry_messages).await {
-            generated_markdown = retry_resp;
-            quality = QualityGate::evaluate_layer(
-                &layer,
-                &generated_markdown,
-                &snippet,
-                is_deep,
-                &generic_phrases,
-            );
+            if !retry_resp.trim().is_empty() {
+                generated_markdown = retry_resp;
+                quality = QualityGate::evaluate_layer(
+                    &layer_key,
+                    &generated_markdown,
+                    &snippet,
+                    is_deep,
+                    &generic_phrases,
+                );
+            }
         }
     }
 
@@ -726,24 +1139,84 @@ pub async fn explain_layer(
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // H1-5: 引用解析 + 程序核验
+    // ---------------------------------------------------------------------------------------------
+    let citations = verify_markdown_citations(&root_path, &file, &generated_markdown);
+
+    // ---------------------------------------------------------------------------------------------
+    // H1-4: 落库缓存（同一选区的四层共享 group_id，历史卡片档案可整组打开）
+    // ---------------------------------------------------------------------------------------------
+    let explanation_id = format!(
+        "exp-{}-{}",
+        Utc::now().timestamp_millis(),
+        layer_key
+    );
+    let group_id = format!("grp-{}", pack.basis_hash.chars().take(16).collect::<String>());
+    let cached_entry = noesis_store::CachedExplanation {
+        id: explanation_id.clone(),
+        project_id: project_id.clone(),
+        file_id: file.clone(),
+        range: format!("{}-{}", range.0, range.1),
+        basis_hash: pack.basis_hash.clone(),
+        prompt_version: prompt_version.clone(),
+        model: effective.model.clone(),
+        request_kind: "explain_layer".to_string(),
+        json: serde_json::json!({ "layer": layer_key, "markdown": generated_markdown }).to_string(),
+        stats: serde_json::json!({
+            "word_count": quality.word_count,
+            "score": quality.score,
+            "passed": quality.passed,
+        })
+        .to_string(),
+        created_at: Utc::now().timestamp(),
+        title: Some(format!(
+            "{} · {}:L{}-L{}",
+            layer_label,
+            file.rsplit('/').next().unwrap_or(&file),
+            range.0,
+            range.1
+        )),
+        file_path: Some(file.clone()),
+        selected_preview: Some(snippet.chars().take(240).collect()),
+        pinned: false,
+        deleted: false,
+        depth_mode: Some(depth_str.clone()),
+        last_opened_at: None,
+        layer: Some(layer_key.clone()),
+        markdown: Some(generated_markdown.clone()),
+        citations_json: serde_json::to_string(&citations).ok(),
+        concepts_json: serde_json::to_string(&concepts).ok(),
+        quality_json: serde_json::to_string(&quality).ok(),
+        group_id: Some(group_id.clone()),
+    };
+    if let Err(err) = state.store.save_explanation_cache(&cached_entry) {
+        tracing::warn!("explain_layer 缓存写入失败: {}", err);
+    }
+
     if let Some(s) = sink {
         let _ = s.send_event(json!({
             "type": "done",
-            "layer": layer,
+            "layer": layer_key,
             "markdown": generated_markdown,
             "quality": quality,
-            "concepts": concepts
+            "citations": citations,
+            "concepts": concepts,
+            "cached": false,
+            "explanation_id": explanation_id,
+            "group_id": group_id,
         }));
     }
 
     Ok(LayerExplainResponse {
-        layer,
+        layer: layer_key,
         markdown: generated_markdown,
         quality,
-        citations: vec![],
+        citations,
         concepts,
         cached: false,
-        explanation_id: None,
+        explanation_id: Some(explanation_id),
+        group_id: Some(group_id),
     })
 }
 
@@ -920,7 +1393,7 @@ pub async fn explain_confusion(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: PROMPT_CONFUSION.to_string(),
+            content: format!("{}\n\n---\n{}", SAFETY_RULES_PROMPT, PROMPT_CONFUSION),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -1406,7 +1879,107 @@ pub async fn ask_project_question(
 
     let mut effective_with_tokens = effective.clone();
     effective_with_tokens.max_tokens = 8192;
-    let final_answer = if let Some(s) = sink {
+
+    // ---------------------------------------------------------------------------------------------
+    // H5-d: use_tools 为真时走只读工具循环（读文件 / 搜索 / ROS2 拓扑），并把每一步推给前端。
+    // 关闭时保持原来的单次流式问答。
+    // ---------------------------------------------------------------------------------------------
+    let wants_tools = use_tools.unwrap_or(true);
+
+    let final_answer = if wants_tools {
+        let active_domains = state
+            .project_map
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|m| m.detected_domains.clone()))
+            .unwrap_or_default();
+
+        let agent_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| json!({ "role": m.role, "content": m.content }))
+            .collect();
+
+        let handle = tokio::runtime::Handle::current();
+        let root_for_loop = root_path.clone();
+        let project_for_loop = project_id.clone();
+        let store_for_loop = state.store.clone();
+        let gateway_for_loop = state.llm.clone();
+        let config_for_loop = effective_with_tokens.clone();
+
+        // H5-d: 工具循环是同步的，用 block_in_place 在当前 worker 线程上跑，
+        // 这样闭包可以安全借用 sink（不需要 'static）。
+        let loop_result = tokio::task::block_in_place(move || {
+            agent_ask::run_ask_agent_loop(
+                &root_for_loop,
+                &project_for_loop,
+                Some(&store_for_loop),
+                &active_domains,
+                agent_messages,
+                &gateway_for_loop,
+                config_for_loop,
+                handle,
+                None,
+                |step| {
+                    if let Some(s) = sink {
+                        let _ = s.send_event(json!({
+                            "type": "tool_call",
+                            "tool_name": step.tool_name,
+                            "tool_args": step.args_summary,
+                            "tool_result": step.result_summary,
+                            "step": step.step,
+                            "duration_ms": step.duration_ms,
+                            "cached_duplicate": step.cached_duplicate
+                        }));
+                    }
+                },
+            )
+        });
+
+        match loop_result {
+            Ok(res) => {
+                if let Some(s) = sink {
+                    let _ = s.send_event(json!({
+                        "type": "agent_summary",
+                        "steps": res.steps.len(),
+                        "forced_termination_reason": res.forced_termination_reason
+                    }));
+                }
+                if res.final_content.trim().is_empty() {
+                    // 工具循环没有拿到可用回答时，回退到普通流式问答
+                    if let Some(s) = sink {
+                        state
+                            .llm
+                            .send_chat_stream(&effective_with_tokens, messages, |delta| {
+                                let _ = s.send_event(json!({ "type": "token", "token": delta }));
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        state
+                            .llm
+                            .send_chat(&effective_with_tokens, messages)
+                            .await
+                            .map_err(|e| e.to_string())?
+                    }
+                } else {
+                    // 把最终答案按块推给前端，保持和流式一致的体验
+                    if let Some(s) = sink {
+                        for chunk in res.final_content.as_bytes().chunks(48) {
+                            let piece = String::from_utf8_lossy(chunk).to_string();
+                            let _ = s.send_event(json!({ "type": "token", "token": piece }));
+                        }
+                    }
+                    res.final_content
+                }
+            }
+            Err(err) => {
+                if let Some(s) = sink {
+                    let _ = s.send_event(json!({ "type": "error", "error": err.clone() }));
+                }
+                return Err(format!("智能体工具循环失败: {}", err));
+            }
+        }
+    } else if let Some(s) = sink {
         state
             .llm
             .send_chat_stream(&effective_with_tokens, messages, |delta| {
@@ -1675,10 +2248,67 @@ pub async fn get_explanation(
     }))
 }
 
+/// H1: 读取一条新版按层记录（或整个分组），供历史卡片档案打开新版解读。
+pub async fn get_explanation_layers(
+    state: &AppState,
+    id: Option<String>,
+    group_id: Option<String>,
+) -> Result<Vec<LayerExplainResponse>, String> {
+    let entries = if let Some(gid) = group_id {
+        state.store.list_explanation_group(&gid).map_err(|e| e.to_string())?
+    } else if let Some(explanation_id) = id {
+        let item = state.store.get_explanation(&explanation_id).map_err(|e| e.to_string())?;
+        match item {
+            Some(entry) => match entry.group_id.clone() {
+                Some(gid) => state
+                    .store
+                    .list_explanation_group(&gid)
+                    .map_err(|e| e.to_string())?,
+                None => vec![entry],
+            },
+            None => vec![],
+        }
+    } else {
+        return Err("需要提供 id 或 group_id".to_string());
+    };
+
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            let layer = entry.layer.clone()?;
+            let markdown = entry.markdown.clone()?;
+            let quality = entry
+                .quality_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<LayerQualityReport>(j).ok())
+                .unwrap_or_default();
+            let citations = entry
+                .citations_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<Vec<CitationItem>>(j).ok())
+                .unwrap_or_default();
+            let concepts = entry
+                .concepts_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+                .unwrap_or_default();
+            Some(LayerExplainResponse {
+                layer,
+                markdown,
+                quality,
+                citations,
+                concepts,
+                cached: true,
+                explanation_id: Some(entry.id),
+                group_id: entry.group_id,
+            })
+        })
+        .collect())
+}
+
 pub async fn rename_explanation(state: &AppState, id: String, new_title: String) -> Result<(), String> {
     state.store.rename_explanation(&id, &new_title).map_err(|e| e.to_string())
 }
-
 pub async fn pin_explanation(state: &AppState, id: String, pinned: bool) -> Result<(), String> {
     state.store.pin_explanation(&id, pinned).map_err(|e| e.to_string())
 }
@@ -1844,6 +2474,30 @@ pub async fn dispatch(
         }
         "index_project" => {
             let res = index_project(Arc::clone(state)).await?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
+        "get_index_status" => {
+            let res = get_index_status(state).await?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
+        "cancel_index" => {
+            let res = cancel_index(state).await?;
+            Ok(Value::Bool(res))
+        }
+        "get_ui_settings" => {
+            let res = get_ui_settings(state).await?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
+        "set_ui_settings" => {
+            let settings: UiSettings = serde_json::from_value(
+                args.get("settings").cloned().unwrap_or_else(|| args.clone()),
+            )
+            .map_err(|e| format!("Invalid UiSettings: {}", e))?;
+            let res = set_ui_settings(state, settings).await?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
+        "get_recent_projects" => {
+            let res = get_recent_projects(state).await?;
             Ok(serde_json::to_value(res).unwrap())
         }
         "get_project_map" => {
@@ -2116,6 +2770,12 @@ pub async fn dispatch(
             let res = get_explanation(state, id).await?;
             Ok(serde_json::to_value(res).unwrap())
         }
+        "get_explanation_layers" => {
+            let id = args["id"].as_str().map(|s| s.to_string());
+            let group_id = args["groupId"].as_str().or_else(|| args["group_id"].as_str()).map(|s| s.to_string());
+            let res = get_explanation_layers(state, id, group_id).await?;
+            Ok(serde_json::to_value(res).unwrap())
+        }
         "rename_explanation" => {
             let id = args["id"].as_str().unwrap_or_default().to_string();
             let title = args["newTitle"].as_str().or_else(|| args["new_title"].as_str()).unwrap_or_default().to_string();
@@ -2178,6 +2838,275 @@ pub async fn dispatch(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    // ---------------------------------------------------------------------------------------------
+    // H1: Markdown 引用解析
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_markdown_citations_shapes() {
+        let md = "看这里 [L12-L18]，还有 [src/node.cpp:L40-L52]，以及 [L30]。\n\
+                  非法写法 [Lxx-Lyy] 与 [../escape.cpp:L1-L2] 不应产生有效引用。";
+        let cites = extract_markdown_citations("src/main.cpp", md);
+
+        assert!(
+            cites.iter().any(|c| c.file == "src/main.cpp" && c.line_start == 12 && c.line_end == 18),
+            "应当解析出当前文件的 L12-L18：{:?}",
+            cites
+        );
+        assert!(
+            cites.iter().any(|c| c.file == "src/node.cpp" && c.line_start == 40 && c.line_end == 52),
+            "应当解析出跨文件引用：{:?}",
+            cites
+        );
+        assert!(
+            cites.iter().any(|c| c.file == "src/main.cpp" && c.line_start == 30 && c.line_end == 30),
+            "单行引用 L30 应被解析成 30-30：{:?}",
+            cites
+        );
+        assert!(
+            !cites.iter().any(|c| c.line_start == 0 || c.line_end < c.line_start),
+            "不应产生非法行号区间：{:?}",
+            cites
+        );
+    }
+
+    #[test]
+    fn test_explain_layer_rejects_unknown_layer() {
+        let state = AppState::new(std::env::temp_dir().join("noesis-test-unknown-layer"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(explain_layer(
+                &state,
+                "nonsense".to_string(),
+                "src/main.cpp".to_string(),
+                (1, 2),
+                "int main() {}".to_string(),
+                None,
+                None,
+                None,
+            ))
+            .expect_err("未知层名必须报错");
+        assert!(err.contains("Unsupported layer"), "实际错误: {}", err);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // H2: 索引任务按项目管理、可取消、只写自己的地图
+    // ---------------------------------------------------------------------------------------------
+
+    fn write_sample_project(root: &std::path::Path, file_name: &str, symbol: &str) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src").join(file_name),
+            format!(
+                "#include <cstdio>\n\nvoid {symbol}() {{\n  printf(\"hello\\n\");\n}}\n\nint main() {{\n  {symbol}();\n  return 0;\n}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.10)\nproject(demo)\n",
+        )
+        .unwrap();
+    }
+
+    /// H2 验收：A 项目索引进行中时打开 B 项目并索引，B 成功，A 的结果不写进 project_map。
+    #[test]
+    fn test_h2_switch_project_during_index_discards_old_result() {
+        let base = std::env::temp_dir().join(format!("noesis-h2-{}", std::process::id()));
+        let proj_a = base.join("proj_a");
+        let proj_b = base.join("proj_b");
+        let _ = std::fs::remove_dir_all(&base);
+        write_sample_project(&proj_a, "a_node.cpp", "alpha_node");
+        write_sample_project(&proj_b, "b_node.cpp", "beta_node");
+
+        let state = Arc::new(AppState::new(base.join("appdata")));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            // 1. 打开 A 并登记一个「正在进行」的索引任务
+            open_project(&state, proj_a.to_string_lossy().to_string())
+                .await
+                .expect("open A");
+            let job_a = IndexJob::new({
+                let guard = state.project_manager.lock().unwrap();
+                guard.as_ref().unwrap().normalized_root()
+            });
+            *state.index_job.lock().unwrap() = Some(job_a.clone());
+
+            // 2. 切到 B：open_project 必须取消 A 的任务
+            open_project(&state, proj_b.to_string_lossy().to_string())
+                .await
+                .expect("open B");
+            assert!(job_a.is_cancelled(), "切换到新项目时必须取消旧索引任务");
+
+            // 3. 索引 B
+            let map_b = index_project(Arc::clone(&state)).await.expect("index B");
+            assert!(
+                map_b.root.contains("proj_b"),
+                "索引结果应属于 B 项目，实际: {}",
+                map_b.root
+            );
+
+            // 4. project_map 里必须是 B 的地图，不能是 A 的
+            let current = state.project_map.lock().unwrap().clone().expect("map exists");
+            assert!(
+                current.root.contains("proj_b"),
+                "project_map 被错误地写成了其他项目: {}",
+                current.root
+            );
+            assert!(
+                current.modules.iter().any(|m| m.path.contains("b_node.cpp")),
+                "B 项目的地图应包含 b_node.cpp"
+            );
+            assert!(
+                !current.modules.iter().any(|m| m.path.contains("a_node.cpp")),
+                "B 项目的地图不应包含 A 的文件"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// H2 验收：同一项目连点两次不报错（返回「已在索引中」而不是全局锁错误）。
+    #[test]
+    fn test_h2_same_project_double_click_is_not_an_error() {
+        let base = std::env::temp_dir().join(format!("noesis-h2-dup-{}", std::process::id()));
+        let proj = base.join("proj");
+        let _ = std::fs::remove_dir_all(&base);
+        write_sample_project(&proj, "dup_node.cpp", "dup_node");
+
+        let state = Arc::new(AppState::new(base.join("appdata")));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            open_project(&state, proj.to_string_lossy().to_string())
+                .await
+                .expect("open");
+
+            // 模拟「第一次点击仍在跑」
+            let project_id = {
+                let guard = state.project_manager.lock().unwrap();
+                guard.as_ref().unwrap().normalized_root()
+            };
+            *state.index_job.lock().unwrap() = Some(IndexJob::new(project_id));
+
+            let err = index_project(Arc::clone(&state))
+                .await
+                .expect_err("第二次点击应返回状态而不是崩溃");
+            assert!(
+                err.contains("INDEX_ALREADY_RUNNING"),
+                "应返回「已在索引中」状态，实际: {}",
+                err
+            );
+            assert!(
+                !err.contains("索引正在进行中，请稍候"),
+                "不应再出现全局锁错误文案"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// H2 验收：索引被取消后返回 Cancelled，并且不写 project_map。
+    #[test]
+    fn test_h2_cancelled_index_does_not_write_map() {
+        let base = std::env::temp_dir().join(format!("noesis-h2-cancel-{}", std::process::id()));
+        let proj = base.join("proj");
+        let _ = std::fs::remove_dir_all(&base);
+        write_sample_project(&proj, "cancel_node.cpp", "cancel_node");
+
+        // 1. 索引器层：预先取消的旗标必须让索引立刻返回 Cancelled
+        let store = noesis_store::DbStore::in_memory().unwrap();
+        let indexer = noesis_indexer::CodeIndexer::new();
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let err = indexer
+            .index_workspace_with_progress(&proj, &store, &[], Some(&cancel), None)
+            .expect_err("预先取消的索引必须失败");
+        assert!(
+            matches!(err, noesis_indexer::IndexerError::Cancelled),
+            "应返回 IndexerError::Cancelled，实际: {}",
+            err
+        );
+
+        // 2. 命令层：取消中的任务不写 project_map
+        let state = Arc::new(AppState::new(base.join("appdata")));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            open_project(&state, proj.to_string_lossy().to_string())
+                .await
+                .expect("open");
+            let project_id = {
+                let guard = state.project_manager.lock().unwrap();
+                guard.as_ref().unwrap().normalized_root()
+            };
+            let job = IndexJob::new(project_id);
+            job.request_cancel();
+            *state.index_job.lock().unwrap() = Some(job);
+
+            // 已取消的旧任务会被新任务取代（用户主动重试），但旧任务的结果不应落库；
+            // 这里只验证取消标记本身不会污染 project_map。
+            assert!(
+                state.project_map.lock().unwrap().is_none(),
+                "取消前后 project_map 都应保持为空"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// H2 验收：家目录 / 根目录不应被当成项目打开。
+    #[test]
+    fn test_h2_rejects_home_directory() {
+        let home = dirs_home().expect("HOME/USERPROFILE 应存在");
+        let state = AppState::new(std::env::temp_dir().join("noesis-h2-home"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(open_project(&state, home.to_string_lossy().to_string()))
+            .expect_err("家目录必须被拒绝");
+        assert!(err.contains("系统级大目录"), "实际错误: {}", err);
+    }
+
+    /// H2: get_index_status 在没有任务时返回 idle。
+    #[test]
+    fn test_h2_index_status_idle() {
+        let state = AppState::new(std::env::temp_dir().join("noesis-h2-status"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let st = rt.block_on(get_index_status(&state)).expect("status");
+        assert!(!st.running);
+        assert_eq!(st.processed, 0);
+        assert_eq!(st.phase, "idle");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // H4: UI 设置
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_h4_ui_settings_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("noesis-h4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::new(dir.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let mut s = get_ui_settings(&state).await.expect("default settings");
+            assert_eq!(s.theme, "catppuccin");
+            assert_eq!(s.tab_size, 4);
+
+            s.theme = "dracula".to_string();
+            s.ui_font_size = 15;
+            s.font_family = "\"Fira Code\", monospace".to_string();
+            set_ui_settings(&state, s).await.expect("save settings");
+
+            let again = get_ui_settings(&state).await.expect("reload settings");
+            assert_eq!(again.theme, "dracula");
+            assert_eq!(again.ui_font_size, 15);
+            assert_eq!(again.font_family, "\"Fira Code\", monospace");
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_all_api_commands_covered() {

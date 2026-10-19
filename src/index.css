@@ -113,3 +113,31 @@ html, body, #root {
     background-color: rgba(137, 180, 250, 0.2) !important;
   }
 }
+
+/* H3: 快捷问题行隐藏横向滚动条 */
+.noesis-hscroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.noesis-hscroll-hidden::-webkit-scrollbar {
+  display: none;
+  height: 0;
+}
+
+/* H1: 层卡片「生成中」光标 */
+@keyframes noesisCaretBlink {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0.15; }
+}
+.noesis-caret {
+  animation: noesisCaretBlink 1s steps(1, end) infinite;
+  border-radius: 1px;
+}
+
+/* H3: 智能问答页的根容器占满右侧栏 */
+.noesis-chat-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}

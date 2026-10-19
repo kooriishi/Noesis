@@ -23,7 +23,7 @@ export const Skeleton: React.FC<SkeletonProps> = ({
         width: typeof width === 'number' ? `${width}px` : width,
         height: typeof height === 'number' ? `${height}px` : height,
         borderRadius,
-        backgroundColor: 'var(--noesis-bg-surface0, #313244)',
+        backgroundColor: 'var(--noesis-bg-surface0)',
         animation: 'skeletonPulse 1.6s ease-in-out infinite',
         ...style,
       }}

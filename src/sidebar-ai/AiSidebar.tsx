@@ -40,9 +40,20 @@ import {
 import { ApiService } from '../services/api';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
 import { useToast } from '../components/feedback';
+import { LayerCard, type LayerCardState } from './LayerCard';
 
 interface AiSidebarProps {
   cards: ExplanationCard[];
+  /** H1: 新版四层解读状态（每层独立） */
+  layerStates?: Record<PerspectiveType, LayerCardState>;
+  depthMode?: 'standard' | 'deep';
+  onRegenerateLayer?: (layer: PerspectiveType) => void;
+  onMarkLayerConfusion?: (layer: PerspectiveType, markdown: string) => void;
+  onLayerFeedback?: (layer: PerspectiveType, type: 'helpful' | 'too_generic' | 'error') => void;
+  onOpenHistory?: (hist: ExplanationSummary) => Promise<boolean>;
+  currentGroupId?: string | null;
+  /** H5-c: 「看不懂」流式答疑的中间文本 */
+  confusionStreamingText?: string;
   contextManifest?: ContextManifest | null;
   fromCache?: boolean;
   explainError?: string | null;
@@ -68,6 +79,14 @@ interface AiSidebarProps {
 
 export const AiSidebar: React.FC<AiSidebarProps> = ({
   cards,
+  layerStates,
+  depthMode: depthModeProp,
+  onRegenerateLayer,
+  onMarkLayerConfusion,
+  onLayerFeedback,
+  onOpenHistory,
+  currentGroupId: _currentGroupId,
+  confusionStreamingText,
   contextManifest,
   fromCache: _fromCache = false,
   explainError,
@@ -94,7 +113,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   const [showManifest, setShowManifest] = useState(false);
 
   // F2 Depth mode
-  const [depthMode, setDepthMode] = useState<'standard' | 'deep'>('standard');
+  const [depthMode, setDepthMode] = useState<'standard' | 'deep'>(depthModeProp || 'standard');
 
   // F3 History state
   const [histories, setHistories] = useState<ExplanationSummary[]>([]);
@@ -131,6 +150,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
   // G6: AI Sidebar Scroll & Stick-to-bottom
   const contentAreaRef = useRef<HTMLDivElement>(null);
+  // H3: 智能问答自己的消息滚动容器 / 自动增高输入框
+  const messagesAreaRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const isAtBottomRef = useRef<boolean>(true);
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
@@ -139,9 +161,34 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     isAtBottomRef.current = atBottom;
   };
 
+  // H3: 消息区自身的滚动（在底部时自动跟随）
+  const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 60;
+  };
+
+  // H3: 输入框自动增高（1–6 行，超出后内部滚动）
+  const autoGrowChatInput = () => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+  };
+
+  // H3: 生成中把发送按钮换成「停止」
+  const handleStopStream = async () => {
+    try {
+      await ApiService.cancelLlmRequest(activeSessionId || 'chat');
+    } catch {
+      // ignore
+    }
+    setIsStreaming(false);
+    toast.info('已请求停止生成');
+  };
+
   useEffect(() => {
-    if (isStreaming && isAtBottomRef.current && contentAreaRef.current) {
-      contentAreaRef.current.scrollTop = contentAreaRef.current.scrollHeight;
+    if (isStreaming && isAtBottomRef.current && messagesAreaRef.current) {
+      messagesAreaRef.current.scrollTop = messagesAreaRef.current.scrollHeight;
     }
   }, [chatMessages, isStreaming]);
 
@@ -313,6 +360,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
   // F3 History Actions
   const handleSelectHistoryItem = async (hist: ExplanationSummary) => {
     try {
+      // H1: 优先按 group_id 打开新版按层记录（四层一起回放）
+      if (onOpenHistory) {
+        const opened = await onOpenHistory(hist);
+        if (opened) {
+          toast.success(`已切换至历史解读: ${hist.title}`);
+          setIsHistoryPickerOpen(false);
+          return;
+        }
+      }
       const expRes = await ApiService.getExplanation(hist.id);
       if (expRes && onLoadHistoryExplanation) {
         onLoadHistoryExplanation(expRes.cards, expRes.manifest);
@@ -497,18 +553,18 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
     const badgeStyle = isVerified
       ? {
           bg: 'var(--noesis-status-verified-bg, rgba(166, 227, 161, 0.14))',
-          fg: 'var(--noesis-status-verified-fg, #a6e3a1)',
+          fg: 'var(--noesis-status-verified-fg, var(--noesis-accent-green))',
           prefix: '✓ 依据已核验',
         }
       : isCorrected
       ? {
           bg: 'var(--noesis-status-corrected-bg, rgba(137, 180, 250, 0.14))',
-          fg: 'var(--noesis-status-corrected-fg, #89b4fa)',
+          fg: 'var(--noesis-status-corrected-fg, var(--noesis-accent-blue))',
           prefix: '✓ 已修正行号',
         }
       : {
           bg: 'var(--noesis-status-unverified-bg, rgba(250, 179, 135, 0.15))',
-          fg: 'var(--noesis-status-unverified-fg, #fab387)',
+          fg: 'var(--noesis-status-unverified-fg, var(--noesis-accent-peach))',
           prefix: '⚠ 引用待核实',
         };
 
@@ -547,6 +603,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
       ? cards
       : cards.filter((c) => c.perspective === activePerspective);
 
+  // H1: 新版四层解读的展示控制
+  const LAYER_ORDER: PerspectiveType[] = ['overall', 'logic', 'syntax', 'principle'];
+  const visibleLayers =
+    activePerspective === 'all'
+      ? LAYER_ORDER
+      : LAYER_ORDER.filter((l) => l === activePerspective);
+  const hasAnyLayerContent = LAYER_ORDER.some((l) => {
+    const st = layerStates?.[l];
+    return Boolean(st && (st.status !== 'idle' || st.markdown));
+  });
+
   const filteredConfusionMarks = confusionMarks.filter((m) => {
     if (confusionFilter === 'unresolved') return !m.resolved_at;
     if (confusionFilter === 'resolved') return Boolean(m.resolved_at);
@@ -560,16 +627,16 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        background: 'var(--noesis-bg-mantle, #181825)',
-        borderLeft: '1px solid var(--noesis-bg-surface0, #313244)',
+        background: 'var(--noesis-bg-mantle)',
+        borderLeft: '1px solid var(--noesis-bg-surface0)',
       }}
     >
       {/* Header Tabs */}
       <div
         style={{
           display: 'flex',
-          background: 'var(--noesis-bg-crust, #11111b)',
-          borderBottom: '1px solid var(--noesis-bg-surface0, #313244)',
+          background: 'var(--noesis-bg-crust)',
+          borderBottom: '1px solid var(--noesis-bg-surface0)',
         }}
       >
         {[
@@ -590,10 +657,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '5px',
-                background: isActive ? 'var(--noesis-bg-mantle, #181825)' : 'transparent',
-                color: isActive ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-text-subtle, #6c7086)',
+                background: isActive ? 'var(--noesis-bg-mantle)' : 'transparent',
+                color: isActive ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-subtle)',
                 border: 'none',
-                borderBottom: isActive ? '2px solid var(--noesis-accent-blue, #89b4fa)' : '2px solid transparent',
+                borderBottom: isActive ? '2px solid var(--noesis-accent-blue)' : '2px solid transparent',
                 fontSize: '11.5px',
                 fontWeight: isActive ? 600 : 400,
                 cursor: 'pointer',
@@ -613,14 +680,19 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
         style={{
           flex: 1,
           minHeight: 0,
-          overflowY: 'auto',
+          // H3: 智能问答页自己管理滚动（消息区单独滚动），外层不再整体滚动
+          overflowY: activeTab === 'chat' ? 'hidden' : 'auto',
           overscrollBehavior: 'contain',
-          padding: '12px',
+          padding: activeTab === 'chat' ? 0 : '12px',
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
         {/* ===================== TAB 1: CARDS ===================== */}
         {activeTab === 'cards' && (
-          <div>
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            {/* H3: 顶部工具条（历史下拉 + 深度模式 + 视角筛选）固定，只有卡片列表滚动 */}
+            <div style={{ flexShrink: 0 }}>
             {/* F3 History Picker Dropdown Bar */}
             <div style={{ position: 'relative', marginBottom: '10px' }}>
               <div
@@ -628,8 +700,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  background: 'var(--noesis-bg-base)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   borderRadius: 'var(--noesis-radius-sm, 6px)',
                   padding: '6px 10px',
                   fontSize: '11.5px',
@@ -646,7 +718,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     gap: '6px',
                     background: 'transparent',
                     border: 'none',
-                    color: 'var(--noesis-text-primary, #cdd6f4)',
+                    color: 'var(--noesis-text-primary)',
                     cursor: 'pointer',
                     fontSize: '11.5px',
                     fontWeight: 500,
@@ -654,7 +726,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     textAlign: 'left',
                   }}
                 >
-                  <BookOpen size={13} color="var(--noesis-accent-blue, #89b4fa)" />
+                  <BookOpen size={13} color="var(--noesis-accent-blue)" />
                   <span style={{ textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
                     {histories.find((h) => h.id === currentExplanationId)?.title || '历史卡片档案 (F3)'}
                   </span>
@@ -662,7 +734,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 </button>
 
                 {/* F2 Depth mode toggle pill */}
-                <div style={{ display: 'flex', background: 'var(--noesis-bg-surface0, #313244)', borderRadius: '12px', padding: '2px', marginLeft: '8px' }}>
+                <div style={{ display: 'flex', background: 'var(--noesis-bg-surface0)', borderRadius: '12px', padding: '2px', marginLeft: '8px' }}>
                   <button
                     onClick={() => {
                       setDepthMode('standard');
@@ -673,8 +745,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       fontSize: '10px',
                       borderRadius: '10px',
                       border: 'none',
-                      background: depthMode === 'standard' ? 'var(--noesis-accent-blue, #89b4fa)' : 'transparent',
-                      color: depthMode === 'standard' ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-muted, #a6adc8)',
+                      background: depthMode === 'standard' ? 'var(--noesis-accent-blue)' : 'transparent',
+                      color: depthMode === 'standard' ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-muted)',
                       fontWeight: 600,
                       cursor: 'pointer',
                     }}
@@ -691,8 +763,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       fontSize: '10px',
                       borderRadius: '10px',
                       border: 'none',
-                      background: depthMode === 'deep' ? 'var(--noesis-accent-mauve, #cba6f7)' : 'transparent',
-                      color: depthMode === 'deep' ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-muted, #a6adc8)',
+                      background: depthMode === 'deep' ? 'var(--noesis-accent-mauve)' : 'transparent',
+                      color: depthMode === 'deep' ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-muted)',
                       fontWeight: 600,
                       cursor: 'pointer',
                     }}
@@ -712,8 +784,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     right: 0,
                     zIndex: 50,
                     marginTop: '4px',
-                    background: 'var(--noesis-bg-base, #1e1e2e)',
-                    border: '1px solid var(--noesis-bg-surface0, #313244)',
+                    background: 'var(--noesis-bg-base)',
+                    border: '1px solid var(--noesis-bg-surface0)',
                     borderRadius: 'var(--noesis-radius-md, 6px)',
                     boxShadow: 'var(--noesis-shadow-lg, 0 12px 30px rgba(0,0,0,0.5))',
                     maxHeight: '260px',
@@ -722,8 +794,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     overflow: 'hidden',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', borderBottom: '1px solid var(--noesis-bg-surface0, #313244)', gap: '6px' }}>
-                    <Search size={12} color="var(--noesis-text-subtle, #6c7086)" />
+                  <div style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', borderBottom: '1px solid var(--noesis-bg-surface0)', gap: '6px' }}>
+                    <Search size={12} color="var(--noesis-text-subtle)" />
                     <input
                       type="text"
                       placeholder="搜索历史卡片..."
@@ -736,7 +808,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         flex: 1,
                         background: 'transparent',
                         border: 'none',
-                        color: 'var(--noesis-text-primary, #cdd6f4)',
+                        color: 'var(--noesis-text-primary)',
                         fontSize: '11px',
                         outline: 'none',
                       }}
@@ -751,8 +823,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         fontSize: '10px',
                         borderRadius: '4px',
                         border: 'none',
-                        background: historyPinnedOnly ? 'var(--noesis-accent-yellow, #f9e2af)' : 'var(--noesis-bg-surface0, #313244)',
-                        color: historyPinnedOnly ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-muted, #a6adc8)',
+                        background: historyPinnedOnly ? 'var(--noesis-accent-yellow)' : 'var(--noesis-bg-surface0)',
+                        color: historyPinnedOnly ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-muted)',
                         cursor: 'pointer',
                       }}
                     >
@@ -762,7 +834,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
                   <div style={{ overflowY: 'auto', flex: 1 }}>
                     {histories.length === 0 ? (
-                      <div style={{ padding: '12px', textAlign: 'center', fontSize: '11px', color: 'var(--noesis-text-subtle, #6c7086)' }}>
+                      <div style={{ padding: '12px', textAlign: 'center', fontSize: '11px', color: 'var(--noesis-text-subtle)' }}>
                         暂无历史卡片记录
                       </div>
                     ) : (
@@ -782,10 +854,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           }}
                         >
                           <div style={{ flex: 1, overflow: 'hidden', marginRight: '6px' }}>
-                            <div style={{ color: 'var(--noesis-text-primary, #cdd6f4)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            <div style={{ color: 'var(--noesis-text-primary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {h.title}
                             </div>
-                            <div style={{ color: 'var(--noesis-text-subtle, #6c7086)', fontSize: '10px' }}>
+                            <div style={{ color: 'var(--noesis-text-subtle)', fontSize: '10px' }}>
                               {h.file_path.split('/').pop()}:{h.range} · {h.depth_mode === 'deep' ? '深入' : '标准'}
                             </div>
                           </div>
@@ -793,21 +865,21 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             <button
                               onClick={(e) => handlePinHistory(e, h)}
                               title={h.pinned ? '取消钉住' : '钉住卡片'}
-                              style={{ background: 'transparent', border: 'none', color: h.pinned ? 'var(--noesis-accent-yellow, #f9e2af)' : 'var(--noesis-text-subtle, #6c7086)', cursor: 'pointer', padding: '2px' }}
+                              style={{ background: 'transparent', border: 'none', color: h.pinned ? 'var(--noesis-accent-yellow)' : 'var(--noesis-text-subtle)', cursor: 'pointer', padding: '2px' }}
                             >
                               <Pin size={12} />
                             </button>
                             <button
                               onClick={(e) => handleRenameHistory(e, h)}
                               title="重命名"
-                              style={{ background: 'transparent', border: 'none', color: 'var(--noesis-text-subtle, #6c7086)', cursor: 'pointer', padding: '2px' }}
+                              style={{ background: 'transparent', border: 'none', color: 'var(--noesis-text-subtle)', cursor: 'pointer', padding: '2px' }}
                             >
                               <Edit2 size={12} />
                             </button>
                             <button
                               onClick={(e) => handleDeleteHistory(e, h)}
                               title="删除"
-                              style={{ background: 'transparent', border: 'none', color: 'var(--noesis-accent-red, #f38ba8)', cursor: 'pointer', padding: '2px' }}
+                              style={{ background: 'transparent', border: 'none', color: 'var(--noesis-accent-red)', cursor: 'pointer', padding: '2px' }}
                             >
                               <Trash2 size={12} />
                             </button>
@@ -840,9 +912,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         borderRadius: '12px',
                         fontSize: '11px',
                         border: '1px solid',
-                        borderColor: isSelected ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-bg-surface0, #313244)',
-                        background: isSelected ? 'rgba(137, 180, 250, 0.15)' : 'var(--noesis-bg-base, #1e1e2e)',
-                        color: isSelected ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-text-muted, #a6adc8)',
+                        borderColor: isSelected ? 'var(--noesis-accent-blue)' : 'var(--noesis-bg-surface0)',
+                        background: isSelected ? 'rgba(137, 180, 250, 0.15)' : 'var(--noesis-bg-base)',
+                        color: isSelected ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-muted)',
                         cursor: 'pointer',
                       }}
                     >
@@ -862,9 +934,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     padding: '3px 8px',
                     borderRadius: '12px',
                     fontSize: '11px',
-                    border: '1px solid var(--noesis-bg-surface0, #313244)',
+                    border: '1px solid var(--noesis-bg-surface0)',
                     background: showManifest ? 'rgba(137, 180, 250, 0.15)' : 'transparent',
-                    color: 'var(--noesis-accent-blue, #89b4fa)',
+                    color: 'var(--noesis-accent-blue)',
                     cursor: 'pointer',
                   }}
                 >
@@ -874,21 +946,23 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               )}
             </div>
 
+            </div>
+
             {/* Collapsible Context Manifest Drawer */}
             {showManifest && contextManifest && (
               <div
                 style={{
-                  background: 'var(--noesis-bg-crust, #11111b)',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  background: 'var(--noesis-bg-crust)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   borderRadius: '6px',
                   padding: '8px 10px',
                   marginBottom: '12px',
                   fontSize: '11px',
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--noesis-accent-blue, #89b4fa)', fontWeight: 600, marginBottom: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--noesis-accent-blue)', fontWeight: 600, marginBottom: '6px' }}>
                   <span>上下文清单 (P0–P7 预算: {contextManifest.total_tokens}/{contextManifest.budget_tokens} tokens)</span>
-                  <span style={{ color: 'var(--noesis-text-subtle, #6c7086)', fontSize: '10px' }}>hash: {contextManifest.basis_hash.slice(0, 10)}</span>
+                  <span style={{ color: 'var(--noesis-text-subtle)', fontSize: '10px' }}>hash: {contextManifest.basis_hash.slice(0, 10)}</span>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                   {contextManifest.layers.map((layer) => (
@@ -898,14 +972,14 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         display: 'flex',
                         justifyContent: 'space-between',
                         alignItems: 'center',
-                        color: layer.included ? 'var(--noesis-text-primary, #cdd6f4)' : 'var(--noesis-text-subtle, #6c7086)',
+                        color: layer.included ? 'var(--noesis-text-primary)' : 'var(--noesis-text-subtle)',
                         fontSize: '10.5px',
                       }}
                     >
                       <span>
                         <strong>[{layer.layer}]</strong> {layer.label}: {layer.summary}
                       </span>
-                      <span style={{ color: layer.trimmed ? 'var(--noesis-accent-peach, #fab387)' : 'var(--noesis-accent-green, #a6e3a1)', whiteSpace: 'nowrap', marginLeft: '6px' }}>
+                      <span style={{ color: layer.trimmed ? 'var(--noesis-accent-peach)' : 'var(--noesis-accent-green)', whiteSpace: 'nowrap', marginLeft: '6px' }}>
                         {layer.tokens} tok {layer.trimmed ? '(已裁剪)' : ''}
                       </span>
                     </div>
@@ -914,6 +988,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               </div>
             )}
 
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
             {isExplaining && (
               <div
                 style={{
@@ -924,8 +999,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   marginBottom: '12px',
                   borderRadius: '6px',
                   background: 'rgba(137, 180, 250, 0.1)',
-                  border: '1px solid var(--noesis-accent-blue, #89b4fa)',
-                  color: 'var(--noesis-accent-blue, #89b4fa)',
+                  border: '1px solid var(--noesis-accent-blue)',
+                  color: 'var(--noesis-accent-blue)',
                   fontSize: '11.5px',
                 }}
               >
@@ -946,7 +1021,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   borderRadius: '6px',
                   background: 'rgba(243, 139, 168, 0.12)',
                   border: '1px solid rgba(243, 139, 168, 0.45)',
-                  color: 'var(--noesis-accent-red, #f38ba8)',
+                  color: 'var(--noesis-accent-red)',
                   fontSize: '11.5px',
                 }}
               >
@@ -962,8 +1037,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       alignItems: 'center',
                       gap: '4px',
                       padding: '4px 8px',
-                      background: 'var(--noesis-accent-red, #f38ba8)',
-                      color: 'var(--noesis-bg-crust, #11111b)',
+                      background: 'var(--noesis-accent-red)',
+                      color: 'var(--noesis-bg-crust)',
                       border: 'none',
                       borderRadius: '4px',
                       fontSize: '11px',
@@ -978,7 +1053,25 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               </div>
             )}
 
-            {filteredCards.length > 0 ? (
+            {/* H1: 新版按层解读（四张 LayerCard，默认全部展开） */}
+            {hasAnyLayerContent ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {visibleLayers.map((layer) => {
+                  const st = layerStates?.[layer] ?? { layer, status: 'idle' as const, markdown: '' };
+                  return (
+                    <LayerCard
+                      key={layer}
+                      state={st}
+                      currentFilePath={contextChip?.file}
+                      onRegenerate={onRegenerateLayer}
+                      onMarkConfusion={onMarkLayerConfusion}
+                      onFeedback={onLayerFeedback}
+                      onJumpToCitation={onJumpToCitation}
+                    />
+                  );
+                })}
+              </div>
+            ) : filteredCards.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 {filteredCards.map((card) => {
                   // F2: Details open by default unless explicitly closed
@@ -987,8 +1080,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     <div
                       key={card.id}
                       style={{
-                        background: 'var(--noesis-bg-base, #1e1e2e)',
-                        border: '1px solid var(--noesis-bg-surface0, #313244)',
+                        background: 'var(--noesis-bg-base)',
+                        border: '1px solid var(--noesis-bg-surface0)',
                         borderRadius: 'var(--noesis-radius-md, 8px)',
                         padding: '12px',
                       }}
@@ -1011,12 +1104,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                 : 'rgba(243, 139, 168, 0.2)',
                             color:
                               card.perspective === 'overall'
-                                ? 'var(--noesis-accent-blue, #89b4fa)'
+                                ? 'var(--noesis-accent-blue)'
                                 : card.perspective === 'logic'
-                                ? 'var(--noesis-accent-green, #a6e3a1)'
+                                ? 'var(--noesis-accent-green)'
                                 : card.perspective === 'syntax'
-                                ? 'var(--noesis-accent-yellow, #f9e2af)'
-                                : 'var(--noesis-accent-red, #f38ba8)',
+                                ? 'var(--noesis-accent-yellow)'
+                                : 'var(--noesis-accent-red)',
                           }}
                         >
                           {card.perspective.toUpperCase()} · {card.title}
@@ -1024,12 +1117,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                           {card.source_matches ? (
-                            <span style={{ fontSize: '10px', color: 'var(--noesis-accent-green, #a6e3a1)', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                            <span style={{ fontSize: '10px', color: 'var(--noesis-accent-green)', display: 'flex', alignItems: 'center', gap: '3px' }}>
                               <ShieldCheck size={12} />
                               选区原文一致
                             </span>
                           ) : (
-                            <span style={{ fontSize: '10px', color: 'var(--noesis-accent-peach, #fab387)', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                            <span style={{ fontSize: '10px', color: 'var(--noesis-accent-peach)', display: 'flex', alignItems: 'center', gap: '3px' }}>
                               <AlertCircle size={12} />
                               选区待核对
                             </span>
@@ -1038,12 +1131,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       </div>
 
                       {/* One sentence */}
-                      <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--noesis-text-primary, #cdd6f4)', marginTop: '8px', lineHeight: '1.4' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--noesis-text-primary)', marginTop: '8px', lineHeight: '1.4' }}>
                         {card.one_sentence}
                       </div>
 
                       {/* Key bullets with Markdown Renderer (F2) */}
-                      <ul style={{ margin: '8px 0', paddingLeft: '16px', fontSize: '12px', color: 'var(--noesis-text-muted, #a6adc8)', lineHeight: '1.5' }}>
+                      <ul style={{ margin: '8px 0', paddingLeft: '16px', fontSize: '12px', color: 'var(--noesis-text-muted)', lineHeight: '1.5' }}>
                         {card.key_bullets.map((b, i) => (
                           <li key={i} style={{ marginBottom: '4px' }}>
                             <MarkdownRenderer content={b} fontSize={12} onJumpToCitation={onJumpToCitation} />
@@ -1064,9 +1157,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                           style={{
                             marginTop: '10px',
                             paddingTop: '10px',
-                            borderTop: '1px solid var(--noesis-bg-surface0, #313244)',
+                            borderTop: '1px solid var(--noesis-bg-surface0)',
                             fontSize: '12px',
-                            color: 'var(--noesis-text-secondary, #bac2de)',
+                            color: 'var(--noesis-text-secondary)',
                             lineHeight: '1.6',
                           }}
                         >
@@ -1093,7 +1186,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             gap: '4px',
                             background: 'transparent',
                             border: 'none',
-                            color: 'var(--noesis-accent-blue, #89b4fa)',
+                            color: 'var(--noesis-accent-blue)',
                             fontSize: '11px',
                             cursor: 'pointer',
                             fontWeight: 500,
@@ -1108,11 +1201,11 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             onClick={() => handleCardFeedback(card.id, card.perspective, 'helpful')}
                             title="标记有深度"
                             style={{
-                              background: 'var(--noesis-bg-surface0, #313244)',
+                              background: 'var(--noesis-bg-surface0)',
                               border: 'none',
                               borderRadius: '4px',
                               padding: '3px 7px',
-                              color: 'var(--noesis-accent-green, #a6e3a1)',
+                              color: 'var(--noesis-accent-green)',
                               fontSize: '10px',
                               cursor: 'pointer',
                             }}
@@ -1123,11 +1216,11 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             onClick={() => handleCardFeedback(card.id, card.perspective, 'too_generic')}
                             title="标记讲得太泛"
                             style={{
-                              background: 'var(--noesis-bg-surface0, #313244)',
+                              background: 'var(--noesis-bg-surface0)',
                               border: 'none',
                               borderRadius: '4px',
                               padding: '3px 7px',
-                              color: 'var(--noesis-accent-yellow, #f9e2af)',
+                              color: 'var(--noesis-accent-yellow)',
                               fontSize: '10px',
                               cursor: 'pointer',
                             }}
@@ -1138,11 +1231,11 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                             onClick={() => handleCardFeedback(card.id, card.perspective, 'wrong')}
                             title="标记有源码依据偏差"
                             style={{
-                              background: 'var(--noesis-bg-surface0, #313244)',
+                              background: 'var(--noesis-bg-surface0)',
                               border: 'none',
                               borderRadius: '4px',
                               padding: '3px 7px',
-                              color: 'var(--noesis-accent-red, #f38ba8)',
+                              color: 'var(--noesis-accent-red)',
                               fontSize: '10px',
                               cursor: 'pointer',
                             }}
@@ -1156,10 +1249,11 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 })}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '36px 12px', color: 'var(--noesis-text-subtle, #6c7086)', fontSize: '12px' }}>
+              <div style={{ textAlign: 'center', padding: '36px 12px', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                 在左侧或编辑区选中任意代码段，即可一键生成四层结构化导读。
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -1169,8 +1263,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
             {/* Top Bar: Learning Profile & Export */}
             <div
               style={{
-                background: 'var(--noesis-bg-base, #1e1e2e)',
-                border: '1px solid var(--noesis-bg-surface0, #313244)',
+                background: 'var(--noesis-bg-base)',
+                border: '1px solid var(--noesis-bg-surface0)',
                 borderRadius: 'var(--noesis-radius-md, 8px)',
                 padding: '10px',
                 display: 'flex',
@@ -1179,10 +1273,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               }}
             >
               <div>
-                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary, #cdd6f4)' }}>
+                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>
                   学习卡点与精读档案 (F6)
                 </div>
-                <div style={{ fontSize: '11px', color: 'var(--noesis-text-muted, #a6adc8)' }}>
+                <div style={{ fontSize: '11px', color: 'var(--noesis-text-muted)' }}>
                   累计记录: <strong>{confusionMarks.length}</strong> 处 · 待解决: <strong>{confusionMarks.filter((m) => !m.resolved_at).length}</strong> 处
                 </div>
               </div>
@@ -1195,8 +1289,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   alignItems: 'center',
                   gap: '4px',
                   padding: '5px 10px',
-                  background: 'var(--noesis-bg-surface0, #313244)',
-                  color: 'var(--noesis-accent-blue, #89b4fa)',
+                  background: 'var(--noesis-bg-surface0)',
+                  color: 'var(--noesis-accent-blue)',
                   border: 'none',
                   borderRadius: 'var(--noesis-radius-sm, 4px)',
                   fontSize: '11px',
@@ -1223,9 +1317,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     borderRadius: '10px',
                     fontSize: '10.5px',
                     border: '1px solid',
-                    borderColor: confusionFilter === f.id ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-bg-surface0, #313244)',
+                    borderColor: confusionFilter === f.id ? 'var(--noesis-accent-blue)' : 'var(--noesis-bg-surface0)',
                     background: confusionFilter === f.id ? 'rgba(137, 180, 250, 0.15)' : 'transparent',
-                    color: confusionFilter === f.id ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-text-muted, #a6adc8)',
+                    color: confusionFilter === f.id ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-muted)',
                     cursor: 'pointer',
                   }}
                 >
@@ -1246,10 +1340,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                       key={m.id}
                       onClick={() => setSelectedConfusionId(m.id)}
                       style={{
-                        background: 'var(--noesis-bg-base, #1e1e2e)',
+                        background: 'var(--noesis-bg-base)',
                         border: isSelected
-                          ? '1px solid var(--noesis-accent-blue, #89b4fa)'
-                          : '1px solid var(--noesis-bg-surface0, #313244)',
+                          ? '1px solid var(--noesis-accent-blue)'
+                          : '1px solid var(--noesis-bg-surface0)',
                         borderRadius: 'var(--noesis-radius-md, 8px)',
                         padding: '12px',
                         cursor: 'pointer',
@@ -1266,12 +1360,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                               fontSize: '10.5px',
                               fontWeight: 600,
                               background: 'rgba(249, 226, 175, 0.15)',
-                              color: 'var(--noesis-accent-yellow, #f9e2af)',
+                              color: 'var(--noesis-accent-yellow)',
                             }}
                           >
                             {m.category || '代码卡点'}
                           </span>
-                          <span style={{ fontSize: '11px', color: 'var(--noesis-accent-blue, #89b4fa)' }}>
+                          <span style={{ fontSize: '11px', color: 'var(--noesis-accent-blue)' }}>
                             {m.file_path.split('/').pop()}:{m.line_start}-{m.line_end}
                           </span>
                         </div>
@@ -1288,9 +1382,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                 alignItems: 'center',
                                 gap: '3px',
                                 padding: '3px 8px',
-                                background: isCelebrated ? 'var(--noesis-accent-yellow, #f9e2af)' : 'rgba(166, 227, 161, 0.15)',
-                                color: isCelebrated ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-accent-green, #a6e3a1)',
-                                border: '1px solid var(--noesis-accent-green, #a6e3a1)',
+                                background: isCelebrated ? 'var(--noesis-accent-yellow)' : 'rgba(166, 227, 161, 0.15)',
+                                color: isCelebrated ? 'var(--noesis-bg-crust)' : 'var(--noesis-accent-green)',
+                                border: '1px solid var(--noesis-accent-green)',
                                 borderRadius: '4px',
                                 fontSize: '10.5px',
                                 fontWeight: 600,
@@ -1309,8 +1403,8 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                               style={{
                                 padding: '2px 6px',
                                 background: 'transparent',
-                                border: '1px solid var(--noesis-bg-surface0, #313244)',
-                                color: 'var(--noesis-text-muted, #a6adc8)',
+                                border: '1px solid var(--noesis-bg-surface0)',
+                                color: 'var(--noesis-text-muted)',
                                 borderRadius: '4px',
                                 fontSize: '10px',
                                 cursor: 'pointer',
@@ -1327,10 +1421,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                         style={{
                           margin: '6px 0',
                           padding: '6px 8px',
-                          background: 'var(--noesis-bg-crust, #11111b)',
+                          background: 'var(--noesis-bg-crust)',
                           borderRadius: '4px',
                           fontSize: '11px',
-                          color: 'var(--noesis-text-primary, #cdd6f4)',
+                          color: 'var(--noesis-text-primary)',
                           overflowX: 'auto',
                           fontFamily: 'var(--noesis-font-mono, monospace)',
                         }}
@@ -1340,9 +1434,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
                       {/* If Selected: show detailed revisions ladder and line-by-line annotations */}
                       {isSelected && confusionDetail && (
-                        <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--noesis-bg-surface0, #313244)' }}>
+                        <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--noesis-bg-surface0)' }}>
                           {isLoadingDetail ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--noesis-accent-blue, #89b4fa)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--noesis-accent-blue)' }}>
                               <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
                               加载精读详情与逐行注释...
                             </div>
@@ -1357,7 +1451,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                       style={{
                                         padding: '2px 6px',
                                         background: rev.level === 1 ? 'rgba(137, 180, 250, 0.15)' : rev.level === 2 ? 'rgba(249, 226, 175, 0.15)' : 'rgba(243, 139, 168, 0.15)',
-                                        color: rev.level === 1 ? 'var(--noesis-accent-blue, #89b4fa)' : rev.level === 2 ? 'var(--noesis-accent-yellow, #f9e2af)' : 'var(--noesis-accent-red, #f38ba8)',
+                                        color: rev.level === 1 ? 'var(--noesis-accent-blue)' : rev.level === 2 ? 'var(--noesis-accent-yellow)' : 'var(--noesis-accent-red)',
                                         borderRadius: '4px',
                                         fontSize: '10px',
                                         fontWeight: 600,
@@ -1366,6 +1460,30 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                       Level {rev.level} · {rev.level === 1 ? '通俗类比' : rev.level === 2 ? '极简示例' : '物理代价'}
                                     </span>
                                   ))}
+                                </div>
+                              )}
+
+                              {/* H5-c: 流式答疑正文（explain_confusion 输出） */}
+                              {confusionStreamingText && (
+                                <div
+                                  style={{
+                                    background: 'var(--noesis-bg-crust)',
+                                    border: '1px solid var(--noesis-bg-surface0)',
+                                    borderRadius: 6,
+                                    padding: '8px 10px',
+                                    maxHeight: 320,
+                                    overflowY: 'auto',
+                                  }}
+                                >
+                                  <div style={{ fontSize: 10.5, color: 'var(--noesis-accent-teal)', marginBottom: 4, fontWeight: 600 }}>
+                                    针对性答疑（七个固定小节）
+                                  </div>
+                                  <MarkdownRenderer
+                                    content={confusionStreamingText}
+                                    fontSize={12}
+                                    currentFilePath={m.file_path}
+                                    onJumpToCitation={onJumpToCitation}
+                                  />
                                 </div>
                               )}
 
@@ -1386,7 +1504,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                 return (
                                   <div key={lastRev.id} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                                     {parsed?.analogy && (
-                                      <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary, #cdd6f4)', lineHeight: '1.4' }}>
+                                      <div style={{ fontSize: '12px', color: 'var(--noesis-text-primary)', lineHeight: '1.4' }}>
                                         <strong>💡 通俗类比：</strong>
                                         <MarkdownRenderer content={parsed.analogy} fontSize={12} onJumpToCitation={onJumpToCitation} />
                                       </div>
@@ -1395,15 +1513,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                     {/* Line-by-line Annotated Code View (F6) */}
                                     {annot && annot.lines && annot.lines.length > 0 && (
                                       <div style={{ marginTop: '6px' }}>
-                                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-teal, #94e2d5)', marginBottom: '4px' }}>
+                                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--noesis-accent-teal)', marginBottom: '4px' }}>
                                           逐行语义精读 (点击跳行):
                                         </div>
                                         <div
                                           style={{
-                                            background: 'var(--noesis-bg-crust, #11111b)',
+                                            background: 'var(--noesis-bg-crust)',
                                             borderRadius: '4px',
                                             padding: '4px 6px',
-                                            border: '1px solid var(--noesis-bg-surface0, #313244)',
+                                            border: '1px solid var(--noesis-bg-surface0)',
                                             maxHeight: '180px',
                                             overflowY: 'auto',
                                             fontFamily: 'var(--noesis-font-mono, monospace)',
@@ -1424,17 +1542,17 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                                                 borderRadius: '2px',
                                               }}
                                             >
-                                              <span style={{ color: 'var(--noesis-text-subtle, #6c7086)', width: '28px', textAlign: 'right' }}>
+                                              <span style={{ color: 'var(--noesis-text-subtle)', width: '28px', textAlign: 'right' }}>
                                                 {ln.line_no}
                                               </span>
-                                              <span style={{ color: 'var(--noesis-text-primary, #cdd6f4)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                              <span style={{ color: 'var(--noesis-text-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                 {ln.code}
                                               </span>
-                                              <span style={{ color: 'var(--noesis-accent-lavender, #b4befe)', fontSize: '10px' }}>
+                                              <span style={{ color: 'var(--noesis-accent-lavender)', fontSize: '10px' }}>
                                                 // {ln.comment}
                                               </span>
                                               {ln.is_hard && (
-                                                <span style={{ padding: '1px 4px', background: 'var(--noesis-accent-red, #f38ba8)', color: 'var(--noesis-bg-crust, #11111b)', borderRadius: '2px', fontSize: '9px', fontWeight: 700 }}>
+                                                <span style={{ padding: '1px 4px', background: 'var(--noesis-accent-red)', color: 'var(--noesis-bg-crust)', borderRadius: '2px', fontSize: '9px', fontWeight: 700 }}>
                                                   难点
                                                 </span>
                                               )}
@@ -1455,7 +1573,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 })}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '36px 12px', color: 'var(--noesis-text-subtle, #6c7086)', fontSize: '12px' }}>
+              <div style={{ textAlign: 'center', padding: '36px 12px', color: 'var(--noesis-text-subtle)', fontSize: '12px' }}>
                 目前没有记录的代码卡点。在代码行号或选区点击「看不懂」随时沉淀难点！
               </div>
             )}
@@ -1464,9 +1582,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
         {/* ===================== TAB 3: CHAT (F4) ===================== */}
         {activeTab === 'chat' && (
-          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-            {/* Session switcher */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            {/* Session switcher (固定，不随消息滚动) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px', padding: '12px 12px 0', flexShrink: 0 }}>
               <select
                 value={activeSessionId}
                 onChange={(e) => {
@@ -1477,10 +1595,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 style={{
                   flex: 1,
                   padding: '4px 8px',
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  background: 'var(--noesis-bg-base)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   borderRadius: '4px',
-                  color: 'var(--noesis-text-primary, #cdd6f4)',
+                  color: 'var(--noesis-text-primary)',
                   fontSize: '11px',
                 }}
               >
@@ -1496,10 +1614,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 title="新建独立会话"
                 style={{
                   padding: '4px 8px',
-                  background: 'var(--noesis-bg-surface0, #313244)',
+                  background: 'var(--noesis-bg-surface0)',
                   border: 'none',
                   borderRadius: '4px',
-                  color: 'var(--noesis-accent-blue, #89b4fa)',
+                  color: 'var(--noesis-accent-blue)',
                   fontSize: '11px',
                   cursor: 'pointer',
                   display: 'flex',
@@ -1519,7 +1637,7 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     background: 'transparent',
                     border: '1px solid rgba(243, 139, 168, 0.3)',
                     borderRadius: '4px',
-                    color: 'var(--noesis-accent-red, #f38ba8)',
+                    color: 'var(--noesis-accent-red)',
                     cursor: 'pointer',
                   }}
                 >
@@ -1528,13 +1646,19 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
               )}
             </div>
 
-            {/* Messages Scroll Area */}
+            {/* Messages Scroll Area — H3: 只有消息区滚动，输入栏固定在底部 */}
             <div
+              ref={messagesAreaRef}
+              onScroll={handleMessagesScroll}
               style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: 'auto',
+                overscrollBehavior: 'contain',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '10px',
-                marginBottom: '10px',
+                padding: '12px',
               }}
             >
               {chatMessages.map((m, idx) => (
@@ -1543,9 +1667,9 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   style={{
                     alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
                     maxWidth: '90%',
-                    background: m.role === 'user' ? 'var(--noesis-accent-blue, #89b4fa)' : 'var(--noesis-bg-base, #1e1e2e)',
-                    border: m.role === 'user' ? 'none' : '1px solid var(--noesis-bg-surface0, #313244)',
-                    color: m.role === 'user' ? 'var(--noesis-bg-crust, #11111b)' : 'var(--noesis-text-primary, #cdd6f4)',
+                    background: m.role === 'user' ? 'var(--noesis-accent-blue)' : 'var(--noesis-bg-base)',
+                    border: m.role === 'user' ? 'none' : '1px solid var(--noesis-bg-surface0)',
+                    color: m.role === 'user' ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-primary)',
                     padding: '8px 12px',
                     borderRadius: 'var(--noesis-radius-md, 8px)',
                     fontSize: '12.5px',
@@ -1568,13 +1692,25 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 </div>
               ))}
               {isStreaming && (
-                <div style={{ alignSelf: 'flex-start', color: 'var(--noesis-accent-blue, #89b4fa)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <div style={{ alignSelf: 'flex-start', color: 'var(--noesis-accent-blue)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}>
                   <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
                   <span>正在流式检索并组装上下文...</span>
                 </div>
               )}
             </div>
 
+            {/* H3: 底部固定区（上下文附件条 / 快捷问题 / 预检横幅 / 输入栏） */}
+            <div
+              style={{
+                flexShrink: 0,
+                padding: '8px 12px 12px',
+                borderTop: '1px solid var(--noesis-bg-surface0)',
+                background: 'var(--noesis-bg-mantle)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+              }}
+            >
             {/* Context Chips (F4) */}
             {contextChip && (
               <div
@@ -1584,11 +1720,10 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                   gap: '6px',
                   padding: '4px 8px',
                   background: 'rgba(137, 180, 250, 0.12)',
-                  border: '1px solid var(--noesis-accent-blue, #89b4fa)',
+                  border: '1px solid var(--noesis-accent-blue)',
                   borderRadius: '4px',
                   fontSize: '11px',
-                  color: 'var(--noesis-accent-blue, #89b4fa)',
-                  marginBottom: '6px',
+                  color: 'var(--noesis-accent-blue)',
                 }}
               >
                 <span
@@ -1599,15 +1734,15 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                 </span>
                 <button
                   onClick={onClearContextChip}
-                  style={{ background: 'transparent', border: 'none', color: 'var(--noesis-accent-blue, #89b4fa)', cursor: 'pointer', padding: 0 }}
+                  style={{ background: 'transparent', border: 'none', color: 'var(--noesis-accent-blue)', cursor: 'pointer', padding: 0 }}
                 >
                   ✕
                 </button>
               </div>
             )}
 
-            {/* Domain Quick-Question Pills (F4) */}
-            <div style={{ display: 'flex', gap: '4px', overflowX: 'auto', paddingBottom: '6px', marginBottom: '4px' }}>
+            {/* Domain Quick-Question Pills (F4) — H3: 隐藏横向滚动条 */}
+            <div className="noesis-hscroll-hidden" style={{ display: 'flex', gap: '4px', overflowX: 'auto', flexWrap: 'nowrap', marginBottom: 0 }}>
               {[
                 '解析此节点话题收发关系',
                 '分析此回调函数的线程安全性',
@@ -1621,11 +1756,12 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
                     whiteSpace: 'nowrap',
                     padding: '3px 8px',
                     borderRadius: '12px',
-                    background: 'var(--noesis-bg-base, #1e1e2e)',
-                    border: '1px solid var(--noesis-bg-surface0, #313244)',
-                    color: 'var(--noesis-accent-lavender, #b4befe)',
+                    background: 'var(--noesis-bg-base)',
+                    border: '1px solid var(--noesis-bg-surface0)',
+                    color: 'var(--noesis-accent-lavender)',
                     fontSize: '10.5px',
                     cursor: 'pointer',
+                    flexShrink: 0,
                   }}
                 >
                   {pill}
@@ -1635,71 +1771,99 @@ export const AiSidebar: React.FC<AiSidebarProps> = ({
 
             {/* Preview Banner */}
             {previewData && (
-              <div style={{ background: 'var(--noesis-bg-crust, #11111b)', border: '1px solid var(--noesis-accent-blue, #89b4fa)', borderRadius: '6px', padding: '8px', marginBottom: '8px', fontSize: '11px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--noesis-accent-blue, #89b4fa)', fontWeight: 'bold' }}>
+              <div style={{ background: 'var(--noesis-bg-crust)', border: '1px solid var(--noesis-accent-blue)', borderRadius: '6px', padding: '8px', fontSize: '11px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--noesis-accent-blue)', fontWeight: 'bold' }}>
                   <span>P0 外发安全预检 ({previewData.total_chars} 字符)</span>
-                  <button onClick={() => setPreviewData(null)} style={{ background: 'transparent', border: 'none', color: 'var(--noesis-text-subtle, #6c7086)', cursor: 'pointer' }}>✕</button>
+                  <button onClick={() => setPreviewData(null)} style={{ background: 'transparent', border: 'none', color: 'var(--noesis-text-subtle)', cursor: 'pointer' }}>✕</button>
                 </div>
-                <div style={{ color: 'var(--noesis-accent-green, #a6e3a1)', margin: '4px 0' }}>
+                <div style={{ color: 'var(--noesis-accent-green)', margin: '4px 0' }}>
                   已安全脱敏: {previewData.contains_sanitized_tokens ? '是 (已擦除敏感密钥/内网IP)' : '未发现敏感字段'}
                 </div>
               </div>
             )}
 
-            {/* Input Bar */}
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <input
-                type="text"
+            {/* Input Bar — H3: 自动增高 textarea，1–6 行 */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-end' }}>
+              <textarea
+                ref={chatInputRef}
                 value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
+                rows={1}
+                onChange={(e) => {
+                  setChatInput(e.target.value);
+                  autoGrowChatInput();
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.nativeEvent.isComposing && !e.shiftKey) {
                     e.preventDefault();
                     handleSendStream();
                   }
                 }}
-                placeholder="针对当前选区代码或架构设计提问..."
+                placeholder="针对当前选区代码或架构设计提问... (Enter 发送 / Shift+Enter 换行)"
                 style={{
                   flex: 1,
+                  resize: 'none',
+                  minHeight: '32px',
+                  maxHeight: '132px',
                   padding: '8px 10px',
-                  background: 'var(--noesis-bg-base, #1e1e2e)',
-                  border: '1px solid var(--noesis-bg-surface0, #313244)',
+                  background: 'var(--noesis-bg-base)',
+                  border: '1px solid var(--noesis-bg-surface0)',
                   borderRadius: 'var(--noesis-radius-sm, 6px)',
-                  color: 'var(--noesis-text-primary, #cdd6f4)',
+                  color: 'var(--noesis-text-primary)',
                   fontSize: '12px',
+                  lineHeight: '1.45',
                   outline: 'none',
+                  fontFamily: 'inherit',
                 }}
               />
               <button
                 onClick={handlePreview}
                 title="P0 安全预检外发内容"
                 style={{
-                  padding: '0 8px',
-                  background: 'var(--noesis-bg-surface0, #313244)',
+                  padding: '7px 8px',
+                  background: 'var(--noesis-bg-surface0)',
                   border: 'none',
                   borderRadius: '6px',
-                  color: 'var(--noesis-text-muted, #a6adc8)',
+                  color: 'var(--noesis-text-muted)',
                   cursor: 'pointer',
                 }}
               >
                 <Eye size={15} />
               </button>
-              <button
-                onClick={() => handleSendStream()}
-                disabled={isStreaming || !chatInput.trim()}
-                style={{
-                  padding: '0 12px',
-                  background: 'var(--noesis-accent-blue, #89b4fa)',
-                  border: 'none',
-                  borderRadius: '6px',
-                  color: 'var(--noesis-bg-crust, #11111b)',
-                  cursor: isStreaming || !chatInput.trim() ? 'default' : 'pointer',
-                  fontWeight: 600,
-                  opacity: isStreaming || !chatInput.trim() ? 0.6 : 1,
-                }}
-              >
-                <Send size={14} />
-              </button>
+              {isStreaming ? (
+                <button
+                  onClick={handleStopStream}
+                  title="停止生成"
+                  style={{
+                    padding: '7px 12px',
+                    background: 'var(--noesis-accent-red)',
+                    border: 'none',
+                    borderRadius: '6px',
+                    color: 'var(--noesis-bg-crust)',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  停止
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSendStream()}
+                  disabled={!chatInput.trim()}
+                  style={{
+                    padding: '7px 12px',
+                    background: 'var(--noesis-accent-blue)',
+                    border: 'none',
+                    borderRadius: '6px',
+                    color: 'var(--noesis-bg-crust)',
+                    cursor: !chatInput.trim() ? 'default' : 'pointer',
+                    fontWeight: 600,
+                    opacity: !chatInput.trim() ? 0.6 : 1,
+                  }}
+                >
+                  <Send size={14} />
+                </button>
+              )}
+            </div>
             </div>
           </div>
         )}

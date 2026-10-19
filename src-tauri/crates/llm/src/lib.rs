@@ -422,6 +422,7 @@ impl OutboundFilter {
     }
 }
 
+#[derive(Clone)]
 pub struct LlmGateway {
     client: reqwest::Client,
     filter: Arc<OutboundFilter>,

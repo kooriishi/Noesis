@@ -26,7 +26,13 @@ pub enum IndexerError {
     Io(#[from] std::io::Error),
     #[error("Store error: {0}")]
     Store(#[from] StoreError),
+    /// H2: 索引被取消（切换项目或用户主动取消），结果不写入 project_map。
+    #[error("Indexing cancelled")]
+    Cancelled,
 }
+
+/// H2: 索引进度回调。每处理完一个文件调用一次（已处理数, 累计发现文件数, 当前文件相对路径）。
+pub type IndexProgressFn<'a> = &'a (dyn Fn(usize, usize, &str) + Send + Sync);
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedFile {
@@ -199,6 +205,22 @@ impl CodeIndexer {
         store: &DbStore,
         adapters: &[&dyn DomainAdapter],
     ) -> Result<(ProjectMap, IndexReport), IndexerError> {
+        self.index_workspace_with_progress(project_root, store, adapters, None, None)
+    }
+
+    /// H2: 支持取消与进度上报的索引入口。
+    ///
+    /// - 每处理一个文件检查一次 `cancel`，被取消时返回 `IndexerError::Cancelled`，
+    ///   并且**不**写任何 project_map（调用方负责不落库）。
+    /// - `progress` 每处理完一个文件回调一次，用于前端进度条。
+    pub fn index_workspace_with_progress(
+        &self,
+        project_root: &Path,
+        store: &DbStore,
+        adapters: &[&dyn DomainAdapter],
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        progress: Option<IndexProgressFn<'_>>,
+    ) -> Result<(ProjectMap, IndexReport), IndexerError> {
         let canonical_root =
             fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
         let project_id = normalize_path(&canonical_root.to_string_lossy());
@@ -258,6 +280,12 @@ impl CodeIndexer {
                 continue;
             }
 
+            if let Some(flag) = cancel {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(IndexerError::Cancelled);
+                }
+            }
+
             let content = match fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -297,7 +325,7 @@ impl CodeIndexer {
             let graph_file = GraphFile {
                 id: file_id,
                 project_id: project_id.clone(),
-                path: rel_str,
+                path: rel_str.clone(),
                 language: lang,
                 sha256,
                 mtime,
@@ -312,6 +340,16 @@ impl CodeIndexer {
                 &extracted.edges,
             )?;
             updated_files += 1;
+
+            if let Some(cb) = progress {
+                cb(updated_files, total_files, &rel_str);
+            }
+        }
+
+        if let Some(flag) = cancel {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(IndexerError::Cancelled);
+            }
         }
 
         let deleted_files = store.delete_stale_files(&project_id, &active_file_ids)?;

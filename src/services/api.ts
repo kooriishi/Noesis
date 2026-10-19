@@ -31,6 +31,11 @@ import {
   AskStreamEvent,
   AskPreviewResponse,
   FeedbackStats,
+  LayerExplainResponse,
+  LayerQualityReport,
+  LayerStreamEvent,
+  IndexStatus,
+  UiSettings,
 } from '../types';
 
 const isTauriEnv = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -226,6 +231,54 @@ export const ApiService = {
       return await invoke<ProjectMap | null>('get_project_map');
     }
     return null;
+  },
+
+  // ----------------- H2: Index status / cancel -----------------
+  async getIndexStatus(): Promise<IndexStatus> {
+    if (isTauriEnv()) {
+      return await invoke<IndexStatus>('get_index_status');
+    }
+    return { running: false, project_id: null, processed: 0, total: 0, phase: 'idle' };
+  },
+
+  async cancelIndex(): Promise<boolean> {
+    if (isTauriEnv()) {
+      return await invoke<boolean>('cancel_index');
+    }
+    return false;
+  },
+
+  // ----------------- H4: UI settings persisted in backend -----------------
+  async getUiSettings(): Promise<UiSettings> {
+    if (isTauriEnv()) {
+      return await invoke<UiSettings>('get_ui_settings');
+    }
+    return {
+      theme: 'catppuccin',
+      editor_font_size: 14,
+      ui_font_size: 13,
+      font_family: 'Consolas, monospace',
+      ui_font_family: '-apple-system, sans-serif',
+      word_wrap: false,
+      tab_size: 4,
+      line_height: 1.6,
+      last_project: null,
+      recent_projects: [],
+    };
+  },
+
+  async setUiSettings(settings: UiSettings): Promise<UiSettings> {
+    if (isTauriEnv()) {
+      return await invoke<UiSettings>('set_ui_settings', { settings });
+    }
+    return settings;
+  },
+
+  async getRecentProjects(): Promise<string[]> {
+    if (isTauriEnv()) {
+      return await invoke<string[]>('get_recent_projects');
+    }
+    return [];
   },
 
   async setReadingStepStatus(stepId: string, status: string): Promise<void> {
@@ -448,6 +501,79 @@ export const ApiService = {
       from_cache: false,
       is_template: true,
     };
+  },
+
+  /**
+   * H1: 按层生成解读（流式）。每层独立调用一次，后端走 `explain_layer`。
+   */
+  async explainLayer(
+    layer: 'overall' | 'logic' | 'syntax' | 'principle',
+    file: string,
+    range: [number, number],
+    snippet: string,
+    depthMode: 'standard' | 'deep' = 'standard',
+    forceRefresh: boolean = false,
+    onEvent?: (event: LayerStreamEvent) => void
+  ): Promise<LayerExplainResponse> {
+    if (isTauriEnv()) {
+      const channel = new Channel<LayerStreamEvent>();
+      if (onEvent) channel.onmessage = (event) => onEvent(event);
+      return await invoke<LayerExplainResponse>('explain_layer', {
+        layer,
+        file,
+        range,
+        snippet,
+        depthMode,
+        forceRefresh,
+        onEvent: channel,
+      });
+    }
+
+    // 纯网页预览模式：本地模拟逐字流式输出
+    const mockMarkdown = `## 一句话定位\n\n（浏览器预览模式）这里将显示【${layer}】层的解读正文。\n\n## 模块介绍\n\n| 元素 | 职责 |\n| --- | --- |\n| \`${file.split('/').pop()}\` | 预览占位 |\n\n[L${range[0]}-L${range[1]}]`;
+    if (onEvent) {
+      for (const ch of mockMarkdown) {
+        onEvent({ type: 'token', layer, token: ch });
+      }
+    }
+    const quality: LayerQualityReport = {
+      passed: true,
+      score: 1,
+      word_count: mockMarkdown.length,
+      min_word_count: 600,
+      has_mermaid: false,
+      line_coverage_percent: 100,
+      generic_phrases_count: 0,
+      missing_sections: [],
+      issues: [],
+    };
+    const result: LayerExplainResponse = {
+      layer,
+      markdown: mockMarkdown,
+      quality,
+      citations: [],
+      concepts: [],
+      cached: false,
+      explanation_id: `mock-${layer}-${Date.now()}`,
+      group_id: `mock-group-${Date.now()}`,
+    };
+    if (onEvent) {
+      onEvent({ type: 'done', ...result });
+    }
+    return result;
+  },
+
+  async getExplanationLayers(
+    id?: string,
+    groupId?: string
+  ): Promise<LayerExplainResponse[]> {
+    if (isTauriEnv()) {
+      return await invoke<LayerExplainResponse[]>('get_explanation_layers', {
+        id,
+        groupId,
+      });
+    }
+    return [];
   },
 
   async cancelLlmRequest(requestId: string): Promise<boolean> {
@@ -1006,6 +1132,35 @@ export const ApiService = {
       full_prompt: '',
       token_estimate: 0,
     };
+  },
+
+  // ----------------- H5-c: Confusion streaming (explain_confusion) -----------------
+  async explainConfusion(
+    params: {
+      markId?: string;
+      file?: string;
+      range?: [number, number];
+      snippet?: string;
+      confusedLayer?: string;
+      userNote?: string;
+      level?: number;
+    },
+    onEvent: (event: { type: string; token?: string; detail?: any; error?: string }) => void
+  ): Promise<ConfusionDetailResponse | null> {
+    if (isTauriEnv()) {
+      const channel = new Channel<any>();
+      channel.onmessage = (event) => onEvent(event);
+      return await invoke<ConfusionDetailResponse>('explain_confusion', {
+        ...params,
+        onEvent: channel,
+      });
+    }
+    // 浏览器预览：直接回放一条模板
+    const mockText =
+      '## 你可能卡在这里\n\n预览模式：这里会给出针对性的卡点诊断。\n\n## 一句话说清\n\n预览占位。';
+    onEvent({ type: 'token', token: mockText });
+    onEvent({ type: 'done' });
+    return null;
   },
 
   // ----------------- F6: Confusion Detail & Revisions -----------------

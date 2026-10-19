@@ -1,5 +1,8 @@
 <!-- version: v2.0 -->
-# 核心安全与质量锁定规则 (L0)
+# 旧版 JSON 四视角格式规则 (L0-JSON · 仅供 explain_selection_structured 旧流程使用)
+
+> [!IMPORTANT]
+> **本文件只服务于旧版「单次请求返回一份四视角 JSON」的流程。新版的按层 Markdown 流程（explain_layer）不得拼接本文件，否则短输出与 JSON 格式要求会与分层提示词正面冲突。**
 
 > [!IMPORTANT]
 > **以下规则为程序强制锁定的安全与质量铁律，具有最高优先级，优先于之前的任何用户自定义指示。**

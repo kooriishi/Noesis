@@ -1,5 +1,5 @@
 use noesis_commands::{
-    AppState, EventSink, LayerExplainResponse,
+    AppState, EventSink, IndexStatus, LayerExplainResponse, UiSettings,
     SystemStatus, StructuredExplainResponse, SubmitExerciseResult, AskPreviewResponse,
     EffectivePromptPreview, ConfusionDetailResponse,
 };
@@ -93,6 +93,40 @@ async fn save_file(path: String, content: String, state: State<'_, Arc<AppState>
 #[tauri::command]
 async fn index_project(state: State<'_, Arc<AppState>>) -> Result<ProjectMap, String> {
     noesis_commands::index_project(state.inner().clone()).await
+}
+
+#[tauri::command]
+async fn get_index_status(state: State<'_, Arc<AppState>>) -> Result<IndexStatus, String> {
+    noesis_commands::get_index_status(&state).await
+}
+
+#[tauri::command]
+async fn cancel_index(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    noesis_commands::cancel_index(&state).await
+}
+
+#[tauri::command]
+async fn get_ui_settings(state: State<'_, Arc<AppState>>) -> Result<UiSettings, String> {
+    noesis_commands::get_ui_settings(&state).await
+}
+
+#[tauri::command]
+async fn set_ui_settings(settings: UiSettings, state: State<'_, Arc<AppState>>) -> Result<UiSettings, String> {
+    noesis_commands::set_ui_settings(&state, settings).await
+}
+
+#[tauri::command]
+async fn get_recent_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
+    noesis_commands::get_recent_projects(&state).await
+}
+
+#[tauri::command]
+async fn get_explanation_layers(
+    id: Option<String>,
+    group_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<LayerExplainResponse>, String> {
+    noesis_commands::get_explanation_layers(&state, id, group_id).await
 }
 
 #[tauri::command]
@@ -491,8 +525,12 @@ async fn explain_confusion(
     confused_layer: Option<String>,
     user_note: Option<String>,
     level: Option<u8>,
+    on_event: tauri::ipc::Channel<serde_json::Value>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ConfusionDetailResponse, String> {
+    // H5-c: 通过 Channel 把每个 token 推给前端
+    let sink = TauriChannelSink(on_event);
+    let sink_ref: Option<&dyn EventSink> = Some(&sink);
     noesis_commands::explain_confusion(
         &state,
         mark_id,
@@ -502,8 +540,9 @@ async fn explain_confusion(
         confused_layer,
         user_note,
         level,
-        None,
-    ).await
+        sink_ref,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -602,6 +641,12 @@ pub fn run() {
             read_file,
             save_file,
             index_project,
+            get_index_status,
+            cancel_index,
+            get_ui_settings,
+            set_ui_settings,
+            get_recent_projects,
+            get_explanation_layers,
             get_project_map,
             set_reading_step_status,
             get_reading_progress,

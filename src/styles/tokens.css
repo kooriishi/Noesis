@@ -1,5 +1,5 @@
 :root {
-  /* Color Palette - Catppuccin Mocha / Dark Learning Theme */
+  /* Color Palette - Catppuccin Mocha (默认深色主题) */
   --noesis-bg-crust: #11111b;
   --noesis-bg-mantle: #181825;
   --noesis-bg-base: #1e1e2e;
@@ -33,9 +33,11 @@
   --noesis-status-knowledge-bg: rgba(203, 166, 247, 0.15);
   --noesis-status-knowledge-fg: #cba6f7;
 
-  /* Typography */
+  /* Typography (H4: 可被设置面板覆盖) */
   --noesis-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
   --noesis-font-mono: "JetBrains Mono", "Fira Code", Consolas, "Courier New", monospace;
+  --noesis-font-size-ui: 13px;
+  --noesis-line-height: 1.6;
   --noesis-font-size-xs: 10.5px;
   --noesis-font-size-sm: 11.5px;
   --noesis-font-size-md: 12.5px;
@@ -50,8 +52,8 @@
   --noesis-space-6: 24px;
 
   /* Border & Radius */
-  --noesis-border-subtle: 1px solid #313244;
-  --noesis-border-active: 1px solid #89b4fa;
+  --noesis-border-subtle: 1px solid var(--noesis-bg-surface0);
+  --noesis-border-active: 1px solid var(--noesis-accent-blue);
   --noesis-radius-sm: 4px;
   --noesis-radius-md: 6px;
   --noesis-radius-lg: 8px;
@@ -63,4 +65,118 @@
   --noesis-shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6);
   --noesis-transition-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
   --noesis-transition-normal: 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   H4: 配色主题。组件里已经使用 var(--noesis-*) 命名，这里只需按主题重定义变量。
+   `:root[data-theme="catppuccin"]` 与默认值一致，显式写出便于切换时覆盖。
+   --------------------------------------------------------------------------------------------- */
+
+:root[data-theme="catppuccin"] {
+  --noesis-bg-crust: #11111b;
+  --noesis-bg-mantle: #181825;
+  --noesis-bg-base: #1e1e2e;
+  --noesis-bg-surface0: #313244;
+  --noesis-bg-surface1: #45475a;
+  --noesis-bg-surface2: #585b70;
+  --noesis-text-primary: #cdd6f4;
+  --noesis-text-secondary: #bac2de;
+  --noesis-text-muted: #a6adc8;
+  --noesis-text-subtle: #6c7086;
+  --noesis-accent-blue: #89b4fa;
+  --noesis-accent-lavender: #b4befe;
+  --noesis-accent-mauve: #cba6f7;
+  --noesis-accent-green: #a6e3a1;
+  --noesis-accent-yellow: #f9e2af;
+  --noesis-accent-peach: #fab387;
+  --noesis-accent-red: #f38ba8;
+  --noesis-accent-teal: #94e2d5;
+}
+
+/* One Dark Pro */
+:root[data-theme="one-dark"] {
+  --noesis-bg-crust: #1b1d23;
+  --noesis-bg-mantle: #21252b;
+  --noesis-bg-base: #282c34;
+  --noesis-bg-surface0: #333842;
+  --noesis-bg-surface1: #3e4451;
+  --noesis-bg-surface2: #4b5263;
+  --noesis-text-primary: #abb2bf;
+  --noesis-text-secondary: #9aa1ad;
+  --noesis-text-muted: #828a99;
+  --noesis-text-subtle: #5c6370;
+  --noesis-accent-blue: #61afef;
+  --noesis-accent-lavender: #7aa2f7;
+  --noesis-accent-mauve: #c678dd;
+  --noesis-accent-green: #98c379;
+  --noesis-accent-yellow: #e5c07b;
+  --noesis-accent-peach: #d19a66;
+  --noesis-accent-red: #e06c75;
+  --noesis-accent-teal: #56b6c2;
+}
+
+/* Dracula */
+:root[data-theme="dracula"] {
+  --noesis-bg-crust: #191a21;
+  --noesis-bg-mantle: #21222c;
+  --noesis-bg-base: #282a36;
+  --noesis-bg-surface0: #343746;
+  --noesis-bg-surface1: #424450;
+  --noesis-bg-surface2: #52556a;
+  --noesis-text-primary: #f8f8f2;
+  --noesis-text-secondary: #dcdce0;
+  --noesis-text-muted: #bfc0cd;
+  --noesis-text-subtle: #6272a4;
+  --noesis-accent-blue: #8be9fd;
+  --noesis-accent-lavender: #bd93f9;
+  --noesis-accent-mauve: #ff79c6;
+  --noesis-accent-green: #50fa7b;
+  --noesis-accent-yellow: #f1fa8c;
+  --noesis-accent-peach: #ffb86c;
+  --noesis-accent-red: #ff5555;
+  --noesis-accent-teal: #8be9fd;
+}
+
+/* Tokyo Night */
+:root[data-theme="tokyo-night"] {
+  --noesis-bg-crust: #16161e;
+  --noesis-bg-mantle: #1a1b26;
+  --noesis-bg-base: #1f2335;
+  --noesis-bg-surface0: #292e42;
+  --noesis-bg-surface1: #3b4261;
+  --noesis-bg-surface2: #545c7e;
+  --noesis-text-primary: #c0caf5;
+  --noesis-text-secondary: #a9b1d6;
+  --noesis-text-muted: #9aa5ce;
+  --noesis-text-subtle: #565f89;
+  --noesis-accent-blue: #7aa2f7;
+  --noesis-accent-lavender: #bb9af7;
+  --noesis-accent-mauve: #9d7cd8;
+  --noesis-accent-green: #9ece6a;
+  --noesis-accent-yellow: #e0af68;
+  --noesis-accent-peach: #ff9e64;
+  --noesis-accent-red: #f7768e;
+  --noesis-accent-teal: #7dcfff;
+}
+
+/* Catppuccin Latte (浅色主题) */
+:root[data-theme="catppuccin-latte"] {
+  --noesis-bg-crust: #dce0e8;
+  --noesis-bg-mantle: #e6e9ef;
+  --noesis-bg-base: #eff1f5;
+  --noesis-bg-surface0: #ccd0da;
+  --noesis-bg-surface1: #bcc0cc;
+  --noesis-bg-surface2: #acb0be;
+  --noesis-text-primary: #4c4f69;
+  --noesis-text-secondary: #5c5f77;
+  --noesis-text-muted: #6c6f85;
+  --noesis-text-subtle: #8c8fa1;
+  --noesis-accent-blue: #1e66f5;
+  --noesis-accent-lavender: #7287fd;
+  --noesis-accent-mauve: #8839ef;
+  --noesis-accent-green: #40a02b;
+  --noesis-accent-yellow: #df8e1d;
+  --noesis-accent-peach: #fe640b;
+  --noesis-accent-red: #d20f39;
+  --noesis-accent-teal: #179299;
 }

@@ -198,6 +198,21 @@ pub struct CachedExplanation {
     pub depth_mode: Option<String>,
     #[serde(default)]
     pub last_opened_at: Option<i64>,
+    /// H1: 该条记录属于哪一层（`overall | logic | syntax | principle`）。旧版 JSON 记录为 `None`。
+    #[serde(default)]
+    pub layer: Option<String>,
+    /// H1: 该层的完整 Markdown 正文（新版流程）。旧版 JSON 记录为 `None`。
+    #[serde(default)]
+    pub markdown: Option<String>,
+    #[serde(default)]
+    pub citations_json: Option<String>,
+    #[serde(default)]
+    pub concepts_json: Option<String>,
+    #[serde(default)]
+    pub quality_json: Option<String>,
+    /// H1: 同一选区的四层归在同一个 group 下。
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +229,12 @@ pub struct ExplanationSummary {
     pub pinned: bool,
     pub created_at: i64,
     pub last_opened_at: Option<i64>,
+    /// H1: 新版按层记录的所属解读分组；旧版 JSON 记录为 None。
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// H1: 该条记录对应的层（overall/logic/syntax/principle）；旧版记录为 None。
+    #[serde(default)]
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -701,6 +722,12 @@ impl DbStore {
             "ALTER TABLE explanations ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;",
             "ALTER TABLE explanations ADD COLUMN depth_mode TEXT;",
             "ALTER TABLE explanations ADD COLUMN last_opened_at INTEGER;",
+            "ALTER TABLE explanations ADD COLUMN layer TEXT;",
+            "ALTER TABLE explanations ADD COLUMN markdown TEXT;",
+            "ALTER TABLE explanations ADD COLUMN citations_json TEXT;",
+            "ALTER TABLE explanations ADD COLUMN concepts_json TEXT;",
+            "ALTER TABLE explanations ADD COLUMN quality_json TEXT;",
+            "ALTER TABLE explanations ADD COLUMN group_id TEXT;",
         ];
         for sql in migrations {
             let _ = conn.execute(sql, []);
@@ -718,6 +745,7 @@ impl DbStore {
             "CREATE INDEX IF NOT EXISTS idx_edges_proj_kind ON edges(project_id, kind);",
             "CREATE INDEX IF NOT EXISTS idx_explanations_basis ON explanations(basis_hash, model, prompt_version);",
             "CREATE INDEX IF NOT EXISTS idx_explanations_proj ON explanations(project_id, deleted, pinned, created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_explanations_group ON explanations(group_id, layer);",
             "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);",
             "CREATE INDEX IF NOT EXISTS idx_concept_events_proj ON concept_events(project_id, concept_id);",
             "CREATE INDEX IF NOT EXISTS idx_prompt_presets_scope ON prompt_presets(scope, is_active);",
@@ -1535,7 +1563,8 @@ impl DbStore {
             .query_row(
                 r#"
                 SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
-                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
+                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at,
+                       layer, markdown, citations_json, concepts_json, quality_json, group_id
                 FROM explanations
                 WHERE basis_hash = ?1 AND model = ?2 AND prompt_version = ?3 AND deleted = 0
                 ORDER BY created_at DESC
@@ -1562,6 +1591,12 @@ impl DbStore {
                         deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
                         depth_mode: r.get(16)?,
                         last_opened_at: r.get(17)?,
+                        layer: r.get(18).ok(),
+                        markdown: r.get(19).ok(),
+                        citations_json: r.get(20).ok(),
+                        concepts_json: r.get(21).ok(),
+                        quality_json: r.get(22).ok(),
+                        group_id: r.get(23).ok(),
                     })
                 },
             )
@@ -1579,9 +1614,11 @@ impl DbStore {
             r#"
             INSERT OR REPLACE INTO explanations (
                 id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
-                title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
+                title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at,
+                layer, markdown, citations_json, concepts_json, quality_json, group_id
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22, ?23, ?24)
             "#,
             params![
                 entry.id,
@@ -1601,7 +1638,13 @@ impl DbStore {
                 if entry.pinned { 1 } else { 0 },
                 if entry.deleted { 1 } else { 0 },
                 entry.depth_mode,
-                entry.last_opened_at.unwrap_or(now)
+                entry.last_opened_at.unwrap_or(now),
+                entry.layer,
+                entry.markdown,
+                entry.citations_json,
+                entry.concepts_json,
+                entry.quality_json,
+                entry.group_id
             ],
         )?;
         Ok(())
@@ -1623,7 +1666,8 @@ impl DbStore {
             SELECT id, project_id, COALESCE(file_path, file_id) as fp, range,
                    COALESCE(title, file_id || ' ' || range) as t,
                    COALESCE(selected_preview, '') as preview,
-                   basis_hash, model, depth_mode, pinned, created_at, last_opened_at
+                   basis_hash, model, depth_mode, pinned, created_at, last_opened_at,
+                   group_id, layer
             FROM explanations
             WHERE project_id = ?1 AND deleted = 0
             "#,
@@ -1661,6 +1705,8 @@ impl DbStore {
                 pinned: r.get::<_, i64>(9).unwrap_or(0) == 1,
                 created_at: r.get(10)?,
                 last_opened_at: r.get(11)?,
+                group_id: r.get(12).ok(),
+                layer: r.get(13).ok(),
             })
         })?;
 
@@ -1683,7 +1729,8 @@ impl DbStore {
             .query_row(
                 r#"
                 SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
-                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at
+                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at,
+                       layer, markdown, citations_json, concepts_json, quality_json, group_id
                 FROM explanations
                 WHERE id = ?1 AND deleted = 0
                 "#,
@@ -1708,6 +1755,12 @@ impl DbStore {
                         deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
                         depth_mode: r.get(16)?,
                         last_opened_at: r.get(17)?,
+                        layer: r.get(18).ok(),
+                        markdown: r.get(19).ok(),
+                        citations_json: r.get(20).ok(),
+                        concepts_json: r.get(21).ok(),
+                        quality_json: r.get(22).ok(),
+                        group_id: r.get(23).ok(),
                     })
                 },
             )
@@ -1740,6 +1793,111 @@ impl DbStore {
             params![id],
         )?;
         Ok(())
+    }
+
+    /// H1: 按 `(basis_hash, layer, model, prompt_version)` 查询某一层已缓存的 Markdown。
+    pub fn get_cached_layer(
+        &self,
+        basis_hash: &str,
+        layer: &str,
+        model: &str,
+        prompt_version: &str,
+    ) -> std::result::Result<Option<CachedExplanation>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn
+            .query_row(
+                r#"
+                SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
+                       title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at,
+                       layer, markdown, citations_json, concepts_json, quality_json, group_id
+                FROM explanations
+                WHERE basis_hash = ?1 AND layer = ?2 AND model = ?3 AND prompt_version = ?4 AND deleted = 0
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+                params![basis_hash, layer, model, prompt_version],
+                |r| {
+                    Ok(CachedExplanation {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        file_id: r.get(2)?,
+                        range: r.get(3)?,
+                        basis_hash: r.get(4)?,
+                        prompt_version: r.get(5)?,
+                        model: r.get(6)?,
+                        request_kind: r.get(7)?,
+                        json: r.get(8)?,
+                        stats: r.get(9)?,
+                        created_at: r.get(10)?,
+                        title: r.get(11)?,
+                        file_path: r.get(12)?,
+                        selected_preview: r.get(13)?,
+                        pinned: r.get::<_, i64>(14).unwrap_or(0) == 1,
+                        deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
+                        depth_mode: r.get(16)?,
+                        last_opened_at: r.get(17)?,
+                        layer: r.get(18).ok(),
+                        markdown: r.get(19).ok(),
+                        citations_json: r.get(20).ok(),
+                        concepts_json: r.get(21).ok(),
+                        quality_json: r.get(22).ok(),
+                        group_id: r.get(23).ok(),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(res)
+    }
+
+    /// H1: 列出同一个解读分组（同一选区的四层）下的全部层记录。
+    pub fn list_explanation_group(
+        &self,
+        group_id: &str,
+    ) -> std::result::Result<Vec<CachedExplanation>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, project_id, file_id, range, basis_hash, prompt_version, model, request_kind, json, stats, created_at,
+                   title, file_path, selected_preview, pinned, deleted, depth_mode, last_opened_at,
+                   layer, markdown, citations_json, concepts_json, quality_json, group_id
+            FROM explanations
+            WHERE group_id = ?1 AND deleted = 0
+            ORDER BY CASE layer WHEN 'overall' THEN 0 WHEN 'logic' THEN 1 WHEN 'syntax' THEN 2 ELSE 3 END
+            "#,
+        )?;
+        let rows = stmt.query_map(params![group_id], |r| {
+            Ok(CachedExplanation {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                file_id: r.get(2)?,
+                range: r.get(3)?,
+                basis_hash: r.get(4)?,
+                prompt_version: r.get(5)?,
+                model: r.get(6)?,
+                request_kind: r.get(7)?,
+                json: r.get(8)?,
+                stats: r.get(9)?,
+                created_at: r.get(10)?,
+                title: r.get(11)?,
+                file_path: r.get(12)?,
+                selected_preview: r.get(13)?,
+                pinned: r.get::<_, i64>(14).unwrap_or(0) == 1,
+                deleted: r.get::<_, i64>(15).unwrap_or(0) == 1,
+                depth_mode: r.get(16)?,
+                last_opened_at: r.get(17)?,
+                layer: r.get(18).ok(),
+                markdown: r.get(19).ok(),
+                citations_json: r.get(20).ok(),
+                concepts_json: r.get(21).ok(),
+                quality_json: r.get(22).ok(),
+                group_id: r.get(23).ok(),
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
     }
 
     /// Stage F5: Prompt Presets Management
@@ -2662,6 +2820,12 @@ mod tests {
             deleted: false,
             depth_mode: Some("standard".to_string()),
             last_opened_at: Some(1000),
+            layer: None,
+            markdown: None,
+            citations_json: None,
+            concepts_json: None,
+            quality_json: None,
+            group_id: None,
         };
 
         store.save_explanation_cache(&exp).unwrap();

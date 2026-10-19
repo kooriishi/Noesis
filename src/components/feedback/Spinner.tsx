@@ -9,7 +9,7 @@ interface SpinnerProps {
 
 export const Spinner: React.FC<SpinnerProps> = ({
   size = 14,
-  color = 'var(--noesis-accent-blue, #89b4fa)',
+  color = 'var(--noesis-accent-blue)',
   className = '',
   label = '加载中...',
 }) => {

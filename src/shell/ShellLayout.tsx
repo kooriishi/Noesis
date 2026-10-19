@@ -22,7 +22,8 @@ import { AiSidebar } from '../sidebar-ai/AiSidebar';
 import { ScratchRunner } from '../scratch/ScratchRunner';
 import { SettingsModal } from './SettingsModal';
 import { useToast } from '../components/feedback';
-import { extractJsonObject } from '../utils/llmJson';
+import { resetMermaidTheme } from '../components/MarkdownRenderer';
+import { type LayerCardState, type LayerStatus } from '../sidebar-ai/LayerCard';
 import {
   FileNode,
   ProjectMap,
@@ -39,15 +40,22 @@ import {
   ExerciseRecord,
   TabItem,
   AppSettings,
+  PerspectiveType,
+  ExplanationSummary,
+  LayerStreamEvent,
+  IndexStatus,
 } from '../types';
 
 const DEFAULT_SETTINGS: AppSettings = {
   editorFontSize: 14,
   uiFontSize: 13,
-  fontFamily: 'Consolas, "Fira Code", monospace',
+  fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
+  uiFontFamily:
+    '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   wordWrap: false,
   tabSize: 4,
-  theme: 'one-dark',
+  lineHeight: 1.6,
+  theme: 'catppuccin',
 };
 
 const DEFAULT_LLM: LlmConfig = {
@@ -62,7 +70,7 @@ const DEFAULT_LLM: LlmConfig = {
 };
 
 export const ShellLayout: React.FC = () => {
-  // App Settings State (persisted in localStorage)
+  // App Settings State (localStorage 作为即时回退，权威值在后端 settings.json)
   const [settings, setSettings] = useState<AppSettings>(() => {
     try {
       const saved = localStorage.getItem('noesis_settings');
@@ -76,9 +84,29 @@ export const ShellLayout: React.FC = () => {
   const [llmConfig, setLlmConfig] = useState<LlmConfig>(DEFAULT_LLM);
   const [systemStatus, setSystemStatus] = useState<SystemStatus>({ db_degraded: false });
 
-  const updateSettings = (newSettings: AppSettings) => {
+  /**
+   * H4: 把设置写进后端 `settings.json`（Linux 版换端口也不会丢），
+   * localStorage 只作为浏览器预览模式与读取失败时的回退。
+   */
+  const persistSettings = (newSettings: AppSettings) => {
     setSettings(newSettings);
     localStorage.setItem('noesis_settings', JSON.stringify(newSettings));
+    ApiService.setUiSettings({
+      theme: newSettings.theme,
+      editor_font_size: newSettings.editorFontSize,
+      ui_font_size: newSettings.uiFontSize,
+      font_family: newSettings.fontFamily,
+      ui_font_family: newSettings.uiFontFamily || DEFAULT_SETTINGS.uiFontFamily || '',
+      word_wrap: newSettings.wordWrap,
+      tab_size: newSettings.tabSize,
+      line_height: newSettings.lineHeight ?? 1.6,
+      last_project: lastProjectRef.current,
+      recent_projects: [],
+    }).catch((err) => console.warn('保存界面设置失败:', err));
+  };
+
+  const updateSettings = (newSettings: AppSettings) => {
+    persistSettings(newSettings);
   };
 
   const updateLlmConfig = async (newConfig: LlmConfig) => {
@@ -132,9 +160,22 @@ export const ShellLayout: React.FC = () => {
   const [isIndexing, setIsIndexing] = useState<boolean>(false);
   const [indexError, setIndexError] = useState<string | null>(null);
   const [lastIndexedAt, setLastIndexedAt] = useState<string | null>(null);
+  // H2: 索引进度与最近项目
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  const [recentProjects, setRecentProjects] = useState<string[]>([]);
+  const lastProjectRef = useRef<string | null>(null);
 
   // AI & Reading State
-  const [cards, setCards] = useState<ExplanationCard[]>([]);
+  // H1: 新版按层解读的状态（四层各自独立）；legacyCards 仅供旧版 JSON 历史记录回放
+  const [legacyCards, setLegacyCards] = useState<ExplanationCard[]>([]);
+  const [layerStates, setLayerStates] = useState<Record<PerspectiveType, LayerCardState>>({
+    overall: { layer: 'overall', status: 'idle', markdown: '' },
+    logic: { layer: 'logic', status: 'idle', markdown: '' },
+    syntax: { layer: 'syntax', status: 'idle', markdown: '' },
+    principle: { layer: 'principle', status: 'idle', markdown: '' },
+  });
+  const [depthModeState, setDepthModeState] = useState<'standard' | 'deep'>('standard');
+  const [currentGroupId, setCurrentGroupId] = useState<string | null>(null);
   const [contextManifest, setContextManifest] = useState<ContextManifest | null>(null);
   const [fromCache, setFromCache] = useState<boolean>(false);
   const [jumpToRange, setJumpToRange] = useState<{
@@ -151,6 +192,8 @@ export const ShellLayout: React.FC = () => {
   } | null>(null);
   const [confusionMarks, setConfusionMarks] = useState<ConfusionMark[]>([]);
   const [activeRewording, setActiveRewording] = useState<RewordingResult | null>(null);
+  // H5-c: 「看不懂」流式答疑的中间文本
+  const [confusionStreamingText, setConfusionStreamingText] = useState<string>('');
   const [dueReviews, setDueReviews] = useState<ExerciseRecord[]>([]);
   const [isExplaining, setIsExplaining] = useState<boolean>(false);
   const [activeSidebarTab, setActiveSidebarTab] = useState<'cards' | 'confusion' | 'chat' | 'settings'>('cards');
@@ -292,6 +335,30 @@ export const ShellLayout: React.FC = () => {
     localStorage.setItem('noesis_right_width', '380');
   };
 
+  // H4: 把设置写进 CSS 变量（界面字体 / 字号 / 行高 / 代码字体）
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = settings.theme || 'catppuccin';
+    root.style.setProperty('--noesis-font-size-ui', `${settings.uiFontSize}px`);
+    if (settings.uiFontFamily) {
+      root.style.setProperty('--noesis-font-sans', settings.uiFontFamily);
+    }
+    if (settings.fontFamily) {
+      root.style.setProperty('--noesis-font-mono', settings.fontFamily);
+    }
+    root.style.setProperty('--noesis-line-height', String(settings.lineHeight ?? 1.6));
+    document.body.style.fontSize = `${settings.uiFontSize}px`;
+    document.body.style.lineHeight = String(settings.lineHeight ?? 1.6);
+    // H4: 主题变了要让 mermaid 用新配色重新初始化
+    resetMermaidTheme();
+  }, [
+    settings.theme,
+    settings.uiFontSize,
+    settings.uiFontFamily,
+    settings.fontFamily,
+    settings.lineHeight,
+  ]);
+
   // Load initial state on mount (guarded against React.StrictMode double-invocation)
   useEffect(() => {
     if (hasInitializedRef.current) return;
@@ -301,19 +368,56 @@ export const ShellLayout: React.FC = () => {
     localStorage.removeItem('noesis_llm_config');
     ApiService.getLlmConfig().then(setLlmConfig).catch(console.error);
     ApiService.getSystemStatus().then(setSystemStatus).catch(console.error);
-    handleOpenProject('./');
+
+    // H4: 界面设置优先从后端读取，失败才回退 localStorage
+    ApiService.getUiSettings()
+      .then((s) => {
+        setSettings((prev) => ({
+          ...prev,
+          theme: s.theme || prev.theme,
+          editorFontSize: s.editor_font_size || prev.editorFontSize,
+          uiFontSize: s.ui_font_size || prev.uiFontSize,
+          fontFamily: s.font_family || prev.fontFamily,
+          uiFontFamily: s.ui_font_family || prev.uiFontFamily,
+          wordWrap: Boolean(s.word_wrap),
+          tabSize: s.tab_size || prev.tabSize,
+          lineHeight: s.line_height || prev.lineHeight,
+        }));
+        lastProjectRef.current = s.last_project || null;
+        setRecentProjects(s.recent_projects || []);
+      })
+      .catch((err) => console.warn('读取后端界面设置失败，使用 localStorage 回退:', err));
+
+    // H2: 启动时不再默认打开 `./`（Linux 版会变成索引整个家目录）。
+    // 有「最近项目」才自动恢复，否则停留在欢迎页等用户导入。
+    ApiService.getRecentProjects()
+      .then((projects) => {
+        setRecentProjects(projects);
+        const last = projects[0];
+        if (last) {
+          handleOpenProject(last, { silent: true, skipIndex: true });
+        }
+      })
+      .catch(console.error);
+
     loadConfusionMarks();
     loadDueReviews();
   }, []);
 
-  const handleOpenProject = async (path?: string) => {
+  const handleOpenProject = async (
+    path?: string,
+    options: { silent?: boolean; skipIndex?: boolean } = {}
+  ) => {
     try {
       const targetPath = path || (await ApiService.selectDirectory());
       if (!targetPath) return;
 
       const tree = await ApiService.openProject(targetPath);
       setCurrentProject(tree);
-      toast.success(`成功载入项目: ${tree.name || targetPath}`);
+      lastProjectRef.current = targetPath;
+      if (!options.silent) {
+        toast.success(`成功载入项目: ${tree.name || targetPath}`);
+      }
 
       // When switching to a new project directory, clear stale tabs from previous workspace
       evictEditorStateCache();
@@ -326,10 +430,32 @@ export const ShellLayout: React.FC = () => {
         await handleOpenFile(first.path);
       }
 
-      await handleTriggerIndex();
+      // H2-5: 不再静默自动索引。已有索引就直接加载旧地图，否则提示用户手动开始。
+      await loadExistingMap();
+      if (!options.skipIndex) {
+        await handleTriggerIndex();
+      }
     } catch (err: any) {
       console.error('Failed to open project:', err);
-      toast.error(`打开工程失败: ${err?.message || String(err)}`);
+      const msg = err?.message || String(err);
+      if (!options.silent) {
+        toast.error(`打开工程失败: ${msg}`);
+      }
+    }
+  };
+
+  /** H2-5: 尝试加载已有索引地图（不触发新的索引）。 */
+  const loadExistingMap = async () => {
+    try {
+      const map = await ApiService.getProjectMap();
+      if (map) {
+        setProjectMap(map);
+        setLastIndexedAt('（已加载历史索引）');
+      } else {
+        setProjectMap(null);
+      }
+    } catch {
+      setProjectMap(null);
     }
   };
 
@@ -480,9 +606,21 @@ export const ShellLayout: React.FC = () => {
     }
   };
 
+  /**
+   * H2: 手动触发索引。带进度轮询与取消；同一项目重复点击不会报错。
+   */
   const handleTriggerIndex = async () => {
     setIsIndexing(true);
     setIndexError(null);
+    setIndexStatus(null);
+
+    // 每秒轮询一次索引进度
+    const pollTimer = window.setInterval(() => {
+      ApiService.getIndexStatus()
+        .then((st) => setIndexStatus(st))
+        .catch(() => {});
+    }, 1000);
+
     try {
       const map = await ApiService.indexProject();
       setProjectMap(map);
@@ -492,12 +630,115 @@ export const ShellLayout: React.FC = () => {
       await ApiService.generateProjectExercises().catch(() => {});
       await loadDueReviews();
     } catch (err: any) {
-      console.error('Index failed:', err);
       const msg = err?.message || String(err);
-      setIndexError(msg);
-      toast.error(`索引构建失败: ${msg}`);
+      if (msg.includes('INDEX_ALREADY_RUNNING')) {
+        // 同一项目连点：不当作错误
+        toast.info(msg.replace('INDEX_ALREADY_RUNNING: ', ''));
+      } else if (msg.includes('INDEX_CANCELLED')) {
+        toast.info(msg.replace('INDEX_CANCELLED: ', ''));
+      } else {
+        setIndexError(msg);
+        toast.error(`索引构建失败: ${msg}`);
+      }
     } finally {
+      window.clearInterval(pollTimer);
       setIsIndexing(false);
+      ApiService.getIndexStatus().then(setIndexStatus).catch(() => {});
+    }
+  };
+
+  const handleCancelIndex = async () => {
+    try {
+      await ApiService.cancelIndex();
+      toast.info('已请求取消索引');
+    } catch (err: any) {
+      toast.error(`取消失败: ${err?.message || String(err)}`);
+    }
+  };
+
+  // -----------------------------------------------------------------------------------------------
+  // H1: 四层解读改走 explain_layer（每层独立并发 + 流式）
+  // -----------------------------------------------------------------------------------------------
+  const LAYERS: PerspectiveType[] = ['overall', 'logic', 'syntax', 'principle'];
+
+  const resetLayerStates = (status: LayerStatus = 'loading') => {
+    const next: Record<PerspectiveType, LayerCardState> = {
+      overall: { layer: 'overall', status, markdown: '' },
+      logic: { layer: 'logic', status, markdown: '' },
+      syntax: { layer: 'syntax', status, markdown: '' },
+      principle: { layer: 'principle', status, markdown: '' },
+    };
+    setLayerStates(next);
+  };
+
+  const runSingleLayer = async (
+    layer: PerspectiveType,
+    snippet: string,
+    startLine: number,
+    endLine: number,
+    depthMode: 'standard' | 'deep',
+    forceRefresh: boolean
+  ) => {
+    if (!activeTab) return;
+    const filePath = activeTab.path;
+
+    setLayerStates((prev) => ({
+      ...prev,
+      [layer]: { layer, status: 'loading', markdown: '' },
+    }));
+
+    let acc = '';
+    try {
+      const res = await ApiService.explainLayer(
+        layer,
+        filePath,
+        [startLine, endLine],
+        snippet,
+        depthMode,
+        forceRefresh,
+        (evt: LayerStreamEvent) => {
+          if (evt.type === 'token' && typeof evt.token === 'string') {
+            acc += evt.token;
+            setLayerStates((prev) => ({
+              ...prev,
+              [layer]: {
+                ...prev[layer],
+                layer,
+                status: 'streaming',
+                markdown: acc,
+              },
+            }));
+          }
+        }
+      );
+
+      setLayerStates((prev) => ({
+        ...prev,
+        [layer]: {
+          layer,
+          status: 'done',
+          markdown: res?.markdown || acc,
+          quality: res?.quality,
+          citations: res?.citations || [],
+          concepts: res?.concepts || [],
+          cached: res?.cached,
+          explanationId: res?.explanation_id,
+        },
+      }));
+      if (res?.group_id) setCurrentGroupId(res.group_id);
+      if (res?.explanation_id) setCurrentExplanationId(res.explanation_id);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      setLayerStates((prev) => ({
+        ...prev,
+        [layer]: {
+          layer,
+          status: 'error',
+          markdown: acc,
+          error: msg,
+        },
+      }));
+      setExplainError(`【${layer}】层生成失败: ${msg}`);
     }
   };
 
@@ -514,45 +755,74 @@ export const ShellLayout: React.FC = () => {
     setIsExplaining(true);
     setExplainError(null);
     setLastExplainSelection({ snippet, startLine, endLine });
+    setDepthModeState(depthMode);
+    resetLayerStates('loading');
 
+    // 四层并发发起：每层独立维护 status / markdown / quality
     try {
-      // Stage C1/C5 structured pipeline (P0-P7 ContextAssembler + CitationVerifier + SQLite basis_hash cache)
-      const structured = await ApiService.explainSelectionStructured(
-        llmConfig,
-        activeTab.path,
-        snippet,
-        startLine,
-        endLine,
-        forceRefresh,
-        depthMode
+      await Promise.all(
+        LAYERS.map((layer) =>
+          runSingleLayer(layer, snippet, startLine, endLine, depthMode, forceRefresh)
+        )
       );
-
-      setCards(structured.cards);
-      setContextManifest(structured.manifest);
-      setFromCache(structured.from_cache);
-      setCurrentExplanationId(structured.explanation_id);
-      if (structured.warning) {
-        setExplainError(structured.warning);
-      }
-    } catch (err: any) {
-      // Fallback to local template cards if structured command throws
-      try {
-        const fallbackCards = await ApiService.explainCode(
-          activeTab.path,
-          snippet,
-          startLine,
-          endLine
-        );
-        setCards(fallbackCards);
-      } catch {
-        // ignore
-      }
-      const msg = err?.message || String(err);
-      setExplainError(`解读生成遇到异常: ${msg}`);
-      toast.error(`解读生成失败: ${msg}`);
     } finally {
       setIsExplaining(false);
     }
+  };
+
+  const handleRegenerateLayer = async (layer: PerspectiveType) => {
+    if (!lastExplainSelection || !activeTab) return;
+    setIsExplaining(true);
+    await runSingleLayer(
+      layer,
+      lastExplainSelection.snippet,
+      lastExplainSelection.startLine,
+      lastExplainSelection.endLine,
+      depthModeState,
+      true
+    );
+    setIsExplaining(false);
+  };
+
+  /** 打开历史记录：优先按 group_id 打开新版按层记录，回退到旧版 JSON 卡片。 */
+  const handleOpenHistory = async (hist: ExplanationSummary) => {
+    try {
+      const layers = await ApiService.getExplanationLayers(hist.id, hist.group_id || undefined);
+      if (layers && layers.length > 0) {
+        const next: Partial<Record<PerspectiveType, LayerCardState>> = {};
+        for (const item of layers) {
+          const key = item.layer as PerspectiveType;
+          next[key] = {
+            layer: key,
+            status: 'done',
+            markdown: item.markdown,
+            quality: item.quality,
+            citations: item.citations,
+            concepts: item.concepts,
+            cached: true,
+            explanationId: item.explanation_id,
+          };
+        }
+        setLayerStates((prev) => ({ ...prev, ...next }));
+        setCurrentExplanationId(hist.id);
+        setCurrentGroupId(hist.group_id || null);
+        setLegacyCards([]);
+        return true;
+      }
+    } catch {
+      // 回退到旧版
+    }
+
+    const legacy = await ApiService.getExplanation(hist.id);
+    if (legacy) {
+      setLegacyCards(legacy.cards);
+      setContextManifest(legacy.manifest);
+      setCurrentExplanationId(hist.id);
+      setCurrentGroupId(null);
+      resetLayerStates('idle');
+      return true;
+    }
+    return false;
   };
 
   const handleRetryExplain = (forceRefresh: boolean = true, depthMode: 'standard' | 'deep' = 'standard') => {
@@ -579,11 +849,20 @@ export const ShellLayout: React.FC = () => {
   };
 
   const handleLoadHistoryExplanation = (loadedCards: ExplanationCard[], manifest?: ContextManifest) => {
-    setCards(loadedCards);
+    setLegacyCards(loadedCards);
+    setLayerStates({
+      overall: { layer: 'overall', status: 'idle', markdown: '' },
+      logic: { layer: 'logic', status: 'idle', markdown: '' },
+      syntax: { layer: 'syntax', status: 'idle', markdown: '' },
+      principle: { layer: 'principle', status: 'idle', markdown: '' },
+    });
     if (manifest) setContextManifest(manifest);
     setFromCache(true);
   };
 
+  /**
+   * H5-c: 「看不懂」改走后端 explain_confusion（流式），不再在前端拼提示词。
+   */
   const handleMarkConfusion = async (
     snippet: string,
     startLine: number,
@@ -596,7 +875,8 @@ export const ShellLayout: React.FC = () => {
     setActiveSidebarTab('confusion');
 
     try {
-      let rewording = await ApiService.markConfusion(
+      // 1. 先落一条本地卡点记录（拿到 mark_id，便于后续升级重讲）
+      const rewording = await ApiService.markConfusion(
         activeTab.path,
         startLine,
         endLine,
@@ -604,67 +884,56 @@ export const ShellLayout: React.FC = () => {
         category,
         reexplainLevel
       );
+      setActiveRewording(rewording);
+      await loadConfusionMarks();
 
       const hasKey = Boolean(
         llmConfig.has_api_key || llmConfig.api_key.trim().length > 5 || llmConfig.provider === 'ollama'
       );
-
-      if (hasKey && !llmConfig.offline_mode) {
-        const prompt = `用户在阅读文件 "${activeTab.path}" 第 ${startLine}-${endLine} 行代码时，针对【${category}】视角标记了「看不懂」（重讲等级 Level ${reexplainLevel}）：
-\`\`\`${activeTab.language}
-${snippet}
-\`\`\`
-
-请根据《NOESIS 代码深度导读专家》准则的分类降维策略为该代码片段进行针对性重讲（必须采用不同于原解释的全新类比和切入点）：
-- overall（整体）：引入生活/工程实体系统类比（如物流分拣机、机场安检流）。
-- logic（逻辑）：剥离多余代码，提供 3 行以内的最简最小可运行示例。
-- syntax（语法）：用最原始的 if-else 或基础语句等价重写该语法糖。
-- principle（底层原理）：指出作者最害怕什么物理代价（爆内存、高延迟、死锁？），反推设计动机。
-
-请以纯 JSON 格式输出，不要有额外文本：
-{
-  "analogy": "生活或工程实体类比，或者设计动机反推",
-  "minimal_example": "3行内极简示例或朴素等价重写",
-  "prerequisite_concept": "前置基础概念",
-  "guidance": "下一步阅读建议"
-}`;
-
-        try {
-          const aiResponse = await ApiService.sendLlmChat(llmConfig, [
-            { role: 'system', content: '你是一位精通启发式教学的代码深度导读专家。' },
-            { role: 'user', content: prompt },
-          ]);
-          const extracted = extractJsonObject<Record<string, any>>(aiResponse);
-          if (extracted.ok) {
-            const parsed = extracted.data;
-            rewording = {
-              mark_id: rewording.mark_id,
-              original_category: category,
-              reexplain_level: reexplainLevel,
-              analogy: parsed.analogy || rewording.analogy,
-              minimal_example: parsed.minimal_example || rewording.minimal_example,
-              prerequisite_concept: parsed.prerequisite_concept || rewording.prerequisite_concept,
-              guidance: parsed.guidance || rewording.guidance,
-              is_template: false,
-            };
-
-            // Persist AI rewording into SQLite marks table (A6)
-            if (rewording.mark_id) {
-              await ApiService.updateConfusionMarkExplanation(
-                rewording.mark_id,
-                JSON.stringify(rewording),
-                llmConfig.model
-              );
-            }
-          }
-        } catch (chatErr: any) {
-          setExplainError(`「看不懂」AI 重讲请求失败：${chatErr?.message || String(chatErr)}`);
-        }
+      if (!hasKey || llmConfig.offline_mode) {
+        toast.info('未配置模型密钥，已保存卡点并展示模板重讲');
+        return;
       }
 
-      setActiveRewording(rewording);
+      // 2. 走 Rust 的 explain_confusion（流式）
+      setConfusionStreamingText('');
+      let acc = '';
+      const detail = await ApiService.explainConfusion(
+        {
+          markId: rewording.mark_id,
+          file: activeTab.path,
+          range: [startLine, endLine],
+          snippet,
+          confusedLayer: category,
+          level: reexplainLevel,
+        },
+        (evt) => {
+          if (evt.type === 'token' && typeof evt.token === 'string') {
+            acc += evt.token;
+            setConfusionStreamingText(acc);
+          } else if (evt.type === 'done' && evt.detail?.mark) {
+            setActiveRewording((prev) => ({
+              ...(prev || ({} as RewordingResult)),
+              mark_id: evt.detail.mark.id,
+              original_category: category,
+              reexplain_level: reexplainLevel,
+              analogy: evt.detail.mark.ai_explanation || acc,
+              minimal_example: prev?.minimal_example || '',
+              prerequisite_concept: prev?.prerequisite_concept || '',
+              guidance: prev?.guidance || '',
+              is_template: false,
+            }));
+          } else if (evt.type === 'error' && evt.error) {
+            setExplainError(`「看不懂」答疑失败：${evt.error}`);
+          }
+        }
+      );
+
+      if (detail?.mark?.ai_explanation) {
+        setConfusionStreamingText(detail.mark.ai_explanation);
+      }
       await loadConfusionMarks();
-      toast.success('已标记代码卡点并生成针对性通俗重讲');
+      toast.success('已生成针对性的卡点答疑');
     } catch (err: any) {
       toast.error(`标记卡点失败: ${err?.message || String(err)}`);
     }
@@ -730,8 +999,8 @@ ${snippet}
         flexDirection: 'column',
         width: '100vw',
         height: '100vh',
-        background: '#11111b',
-        color: '#cdd6f4',
+        background: 'var(--noesis-bg-crust)',
+        color: 'var(--noesis-text-primary)',
         overflow: 'hidden',
         fontSize: `${settings.uiFontSize}px`,
         userSelect: isResizing ? 'none' : 'auto',
@@ -741,8 +1010,8 @@ ${snippet}
       <header
         style={{
           height: '42px',
-          background: '#181825',
-          borderBottom: '1px solid #313244',
+          background: 'var(--noesis-bg-mantle)',
+          borderBottom: '1px solid var(--noesis-bg-surface0)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -759,7 +1028,7 @@ ${snippet}
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#a6adc8',
+              color: 'var(--noesis-text-muted)',
               cursor: 'pointer',
               padding: '3px',
               display: 'flex',
@@ -771,8 +1040,8 @@ ${snippet}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span
               style={{
-                background: 'linear-gradient(135deg, #89b4fa, #cba6f7)',
-                color: '#11111b',
+                background: 'linear-gradient(135deg, var(--noesis-accent-blue), var(--noesis-accent-mauve))',
+                color: 'var(--noesis-bg-crust)',
                 fontWeight: 900,
                 fontSize: '11px',
                 padding: '2px 6px',
@@ -782,14 +1051,14 @@ ${snippet}
             >
               NOESIS
             </span>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: '#cdd6f4' }}>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--noesis-text-primary)' }}>
               代码学习型 IDE
             </span>
           </div>
 
-          <div style={{ width: '1px', height: '14px', background: '#313244' }} />
+          <div style={{ width: '1px', height: '14px', background: 'var(--noesis-bg-surface0)' }} />
 
-          <span style={{ fontSize: '12px', color: '#6c7086' }}>
+          <span style={{ fontSize: '12px', color: 'var(--noesis-text-subtle)' }}>
             {currentProject ? currentProject.name : '未加载工作区'}
           </span>
         </div>
@@ -804,8 +1073,8 @@ ${snippet}
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              background: activeTab?.isDirty ? '#89b4fa' : '#313244',
-              color: activeTab?.isDirty ? '#11111b' : '#cdd6f4',
+              background: activeTab?.isDirty ? 'var(--noesis-accent-blue)' : 'var(--noesis-bg-surface0)',
+              color: activeTab?.isDirty ? 'var(--noesis-bg-crust)' : 'var(--noesis-text-primary)',
               border: 'none',
               borderRadius: '4px',
               padding: '4px 10px',
@@ -825,10 +1094,10 @@ ${snippet}
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              background: showScratch ? 'rgba(137, 180, 250, 0.2)' : '#313244',
-              color: showScratch ? '#89b4fa' : '#cdd6f4',
+              background: showScratch ? 'rgba(137, 180, 250, 0.2)' : 'var(--noesis-bg-surface0)',
+              color: showScratch ? 'var(--noesis-accent-blue)' : 'var(--noesis-text-primary)',
               border: '1px solid',
-              borderColor: showScratch ? '#89b4fa' : 'transparent',
+              borderColor: showScratch ? 'var(--noesis-accent-blue)' : 'transparent',
               borderRadius: '4px',
               padding: '4px 10px',
               fontSize: '11.5px',
@@ -847,10 +1116,10 @@ ${snippet}
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              background: dueReviews.length > 0 ? 'rgba(249, 226, 175, 0.18)' : '#313244',
-              color: dueReviews.length > 0 ? 'var(--noesis-accent-yellow, #f9e2af)' : '#cdd6f4',
+              background: dueReviews.length > 0 ? 'rgba(249, 226, 175, 0.18)' : 'var(--noesis-bg-surface0)',
+              color: dueReviews.length > 0 ? 'var(--noesis-accent-yellow)' : 'var(--noesis-text-primary)',
               border: '1px solid',
-              borderColor: dueReviews.length > 0 ? 'var(--noesis-accent-yellow, #f9e2af)' : 'transparent',
+              borderColor: dueReviews.length > 0 ? 'var(--noesis-accent-yellow)' : 'transparent',
               borderRadius: '4px',
               padding: '4px 8px',
               fontSize: '11.5px',
@@ -863,8 +1132,8 @@ ${snippet}
             {dueReviews.length > 0 && (
               <span
                 style={{
-                  background: 'var(--noesis-accent-red, #f38ba8)',
-                  color: '#11111b',
+                  background: 'var(--noesis-accent-red)',
+                  color: 'var(--noesis-bg-crust)',
                   borderRadius: '10px',
                   padding: '0 5px',
                   fontSize: '10px',
@@ -888,7 +1157,7 @@ ${snippet}
               background: 'rgba(166, 227, 161, 0.1)',
               border: '1px solid rgba(166, 227, 161, 0.3)',
               borderRadius: '12px',
-              color: '#a6e3a1',
+              color: 'var(--noesis-accent-green)',
               fontSize: '11px',
               fontWeight: 600,
             }}
@@ -904,8 +1173,8 @@ ${snippet}
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              background: '#313244',
-              color: '#cdd6f4',
+              background: 'var(--noesis-bg-surface0)',
+              color: 'var(--noesis-text-primary)',
               border: 'none',
               borderRadius: '4px',
               padding: '4px 8px',
@@ -913,7 +1182,7 @@ ${snippet}
               cursor: 'pointer',
             }}
           >
-            <SettingsIcon size={14} color="#89b4fa" />
+            <SettingsIcon size={14} color="var(--noesis-accent-blue)" />
             设置
           </button>
 
@@ -923,7 +1192,7 @@ ${snippet}
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#a6adc8',
+              color: 'var(--noesis-text-muted)',
               cursor: 'pointer',
               padding: '3px',
               display: 'flex',
@@ -953,7 +1222,9 @@ ${snippet}
             onSelectFile={handleOpenFile}
             onOpenProject={() => handleOpenProject()}
             onTriggerIndex={handleTriggerIndex}
+            onCancelIndex={handleCancelIndex}
             isIndexing={isIndexing}
+            indexStatus={indexStatus}
             indexError={indexError}
             lastIndexedAt={lastIndexedAt}
           />
@@ -968,12 +1239,12 @@ ${snippet}
             style={{
               width: '4px',
               cursor: 'col-resize',
-              background: isDraggingLeftRef.current ? '#89b4fa' : 'transparent',
+              background: isDraggingLeftRef.current ? 'var(--noesis-accent-blue)' : 'transparent',
               transition: 'background 0.15s ease',
               zIndex: 30,
               flexShrink: 0,
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#89b4fa')}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--noesis-accent-blue)')}
             onMouseLeave={(e) => {
               if (!isDraggingLeftRef.current) e.currentTarget.style.background = 'transparent';
             }}
@@ -996,8 +1267,8 @@ ${snippet}
             key={`tab-bar-${tabBarEpoch}`}
             style={{
               height: '34px',
-              background: '#181825',
-              borderBottom: '1px solid #313244',
+              background: 'var(--noesis-bg-mantle)',
+              borderBottom: '1px solid var(--noesis-bg-surface0)',
               display: 'flex',
               alignItems: 'center',
               overflowX: 'auto',
@@ -1017,10 +1288,10 @@ ${snippet}
                     alignItems: 'center',
                     gap: '6px',
                     padding: '6px 10px',
-                    background: isActive ? '#1e1e2e' : 'transparent',
-                    borderRight: '1px solid #313244',
-                    borderTop: isActive ? '2px solid #89b4fa' : '2px solid transparent',
-                    color: isActive ? '#cdd6f4' : '#6c7086',
+                    background: isActive ? 'var(--noesis-bg-base)' : 'transparent',
+                    borderRight: '1px solid var(--noesis-bg-surface0)',
+                    borderTop: isActive ? '2px solid var(--noesis-accent-blue)' : '2px solid transparent',
+                    color: isActive ? 'var(--noesis-text-primary)' : 'var(--noesis-text-subtle)',
                     cursor: 'pointer',
                     fontSize: '12px',
                     whiteSpace: 'nowrap',
@@ -1028,16 +1299,16 @@ ${snippet}
                     transition: 'all 0.1s ease',
                   }}
                   onMouseEnter={(e) => {
-                    if (!isActive) e.currentTarget.style.color = '#cdd6f4';
+                    if (!isActive) e.currentTarget.style.color = 'var(--noesis-text-primary)';
                   }}
                   onMouseLeave={(e) => {
-                    if (!isActive) e.currentTarget.style.color = '#6c7086';
+                    if (!isActive) e.currentTarget.style.color = 'var(--noesis-text-subtle)';
                   }}
                 >
                   {isMarkdown ? (
-                    <FileText size={13} color="#fab387" />
+                    <FileText size={13} color="var(--noesis-accent-peach)" />
                   ) : (
-                    <FileCode size={13} color="#a6e3a1" />
+                    <FileCode size={13} color="var(--noesis-accent-green)" />
                   )}
                   <span>{tab.name}</span>
 
@@ -1047,7 +1318,7 @@ ${snippet}
                         width: '6px',
                         height: '6px',
                         borderRadius: '50%',
-                        backgroundColor: '#fab387',
+                        backgroundColor: 'var(--noesis-accent-peach)',
                         marginLeft: '2px',
                       }}
                       title="有未保存修改"
@@ -1060,7 +1331,7 @@ ${snippet}
                     style={{
                       background: 'transparent',
                       border: 'none',
-                      color: '#6c7086',
+                      color: 'var(--noesis-text-subtle)',
                       borderRadius: '3px',
                       padding: '2px',
                       cursor: 'pointer',
@@ -1068,8 +1339,8 @@ ${snippet}
                       alignItems: 'center',
                       marginLeft: '4px',
                     }}
-                    onMouseEnter={(e) => (e.currentTarget.style.color = '#f38ba8')}
-                    onMouseLeave={(e) => (e.currentTarget.style.color = '#6c7086')}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--noesis-accent-red)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--noesis-text-subtle)')}
                   >
                     <X size={12} />
                   </button>
@@ -1078,7 +1349,7 @@ ${snippet}
             })}
 
             {tabs.length === 0 && (
-              <span style={{ fontSize: '11px', color: '#6c7086', padding: '0 8px' }}>
+              <span style={{ fontSize: '11px', color: 'var(--noesis-text-subtle)', padding: '0 8px' }}>
                 无已打开的文件
               </span>
             )}
@@ -1094,6 +1365,7 @@ ${snippet}
                 fontSize={settings.editorFontSize}
                 fontFamily={settings.fontFamily}
                 wordWrap={settings.wordWrap}
+                theme={settings.theme}
                 jumpToRange={jumpToRange}
                 onContentChange={handleActiveContentChange}
                 onSave={handleSaveActiveFile}
@@ -1103,6 +1375,7 @@ ${snippet}
                 onSendToScratch={handleSendToScratch}
               />
             ) : (
+              /* H2-1: 欢迎页（不再默认打开 `./` 静默索引家目录） */
               <div
                 style={{
                   height: '100%',
@@ -1110,15 +1383,67 @@ ${snippet}
                   flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: '#6c7086',
+                  color: 'var(--noesis-text-subtle)',
                   fontSize: '13px',
-                  gap: '12px',
+                  gap: '14px',
+                  padding: '24px',
                 }}
               >
                 <Code size={40} style={{ opacity: 0.3 }} />
-                <span>从左侧文件树点击打开代码文件，或导入新项目</span>
+                <div style={{ fontSize: 14, color: 'var(--noesis-text-muted)' }}>
+                  {currentProject ? '从左侧文件树选择要阅读的文件' : '还没有打开任何项目'}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    onClick={() => handleOpenProject()}
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--noesis-accent-blue)',
+                      color: 'var(--noesis-bg-crust)',
+                      border: 'none',
+                      borderRadius: 4,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    导入项目
+                  </button>
+                </div>
+                {recentProjects.length > 0 && (
+                  <div style={{ width: '100%', maxWidth: 460, marginTop: 8 }}>
+                    <div style={{ fontSize: 11, color: 'var(--noesis-text-subtle)', marginBottom: 6 }}>
+                      最近打开
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {recentProjects.slice(0, 6).map((p) => (
+                        <button
+                          key={p}
+                          onClick={() => handleOpenProject(p)}
+                          title={p}
+                          style={{
+                            textAlign: 'left',
+                            padding: '6px 10px',
+                            background: 'var(--noesis-bg-base)',
+                            border: '1px solid var(--noesis-bg-surface0)',
+                            borderRadius: 4,
+                            color: 'var(--noesis-text-secondary)',
+                            fontSize: 11.5,
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
+
           </div>
 
           {/* Bottom Docked Scratch Runner (G6 Draggable Drawer) */}
@@ -1132,14 +1457,14 @@ ${snippet}
                 style={{
                   height: '4px',
                   cursor: 'row-resize',
-                  background: isDraggingDrawer ? '#89b4fa' : '#313244',
+                  background: isDraggingDrawer ? 'var(--noesis-accent-blue)' : 'var(--noesis-bg-surface0)',
                   transition: 'background 0.15s ease',
                   zIndex: 25,
                   userSelect: 'none',
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = '#89b4fa')}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--noesis-accent-blue)')}
                 onMouseLeave={(e) => {
-                  if (!isDraggingDrawer) e.currentTarget.style.background = '#313244';
+                  if (!isDraggingDrawer) e.currentTarget.style.background = 'var(--noesis-bg-surface0)';
                 }}
                 title="拖拽调节高度 (120px - 窗口高度-160px)，双击循环切换 120px / 280px / 最大高度"
               />
@@ -1165,12 +1490,12 @@ ${snippet}
             style={{
               width: '4px',
               cursor: 'col-resize',
-              background: isDraggingRightRef.current ? '#89b4fa' : 'transparent',
+              background: isDraggingRightRef.current ? 'var(--noesis-accent-blue)' : 'transparent',
               transition: 'background 0.15s ease',
               zIndex: 30,
               flexShrink: 0,
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#89b4fa')}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--noesis-accent-blue)')}
             onMouseLeave={(e) => {
               if (!isDraggingRightRef.current) e.currentTarget.style.background = 'transparent';
             }}
@@ -1188,7 +1513,26 @@ ${snippet}
           }}
         >
           <AiSidebar
-            cards={cards}
+            cards={legacyCards}
+            layerStates={layerStates}
+            depthMode={depthModeState}
+            confusionStreamingText={confusionStreamingText}
+            currentGroupId={currentGroupId}
+            onOpenHistory={handleOpenHistory}
+            onRegenerateLayer={handleRegenerateLayer}
+            onMarkLayerConfusion={(_layer, markdown) => {
+              if (!lastExplainSelection) return;
+              handleMarkConfusion(
+                lastExplainSelection.snippet,
+                lastExplainSelection.startLine,
+                lastExplainSelection.endLine,
+                _layer,
+                1
+              );
+              // 把本层全文作为上下文备注一并带上
+              if (markdown) setContextChip(null);
+            }}
+            onLayerFeedback={(layer, type) => handleMarkCardFeedback(layer, type)}
             contextManifest={contextManifest}
             fromCache={fromCache}
             explainError={explainError}
@@ -1218,20 +1562,20 @@ ${snippet}
       <footer
         style={{
           height: '24px',
-          background: '#11111b',
-          borderTop: '1px solid #313244',
+          background: 'var(--noesis-bg-crust)',
+          borderTop: '1px solid var(--noesis-bg-surface0)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '0 12px',
           fontSize: '11px',
-          color: '#6c7086',
+          color: 'var(--noesis-text-subtle)',
           userSelect: 'none',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#a6e3a1' }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#a6e3a1' }} />
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--noesis-accent-green)' }}>
+            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--noesis-accent-green)' }} />
             Rust 内核 (Tauri 2) 在线
           </span>
           {systemStatus.db_degraded && (
@@ -1241,7 +1585,7 @@ ${snippet}
                 display: 'flex',
                 alignItems: 'center',
                 gap: '4px',
-                color: '#f38ba8',
+                color: 'var(--noesis-accent-red)',
                 fontWeight: 600,
               }}
             >
@@ -1254,7 +1598,7 @@ ${snippet}
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
-              color: isKeyConfigured ? '#a6e3a1' : '#f9e2af',
+              color: isKeyConfigured ? 'var(--noesis-accent-green)' : 'var(--noesis-accent-yellow)',
             }}
           >
             <span
@@ -1262,7 +1606,7 @@ ${snippet}
                 width: '6px',
                 height: '6px',
                 borderRadius: '50%',
-                background: isKeyConfigured ? '#a6e3a1' : '#f9e2af',
+                background: isKeyConfigured ? 'var(--noesis-accent-green)' : 'var(--noesis-accent-yellow)',
               }}
             />
             {isKeyConfigured

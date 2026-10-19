@@ -1,3 +1,5 @@
+mod http;
+
 use fs2::FileExt;
 use include_dir::{include_dir, Dir};
 use noesis_commands::{dispatch, AppState, EventSink, ACTIVE_TASKS, IS_INDEXING};
@@ -129,6 +131,68 @@ fn get_or_create_channel(channels: &ChannelMap, id: &str) -> broadcast::Sender<S
     }
 }
 
+// H5-b: 依次尝试 Chromium 系浏览器的 --app 独立窗口，都失败时才退回 xdg-open。
+fn open_app_window(url: &str) {
+    const CANDIDATES: [&str; 5] = [
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+        "brave-browser",
+    ];
+    for bin in CANDIDATES {
+        let spawned = Command::new(bin)
+            .arg(format!("--app={}", url))
+            .arg("--window-size=1280,840")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if spawned.is_ok() {
+            return;
+        }
+    }
+    let _ = Command::new("xdg-open").arg(url).spawn();
+}
+
+// H5-a: v0.1.1 的数据目录是 `~/.local/share/com.noesis.ide`，v0.1.2 一度改成了 `~/.local/share/noesis`。
+// 这里统一回 `com.noesis.ide`，并把旧目录里的数据库与凭据文件迁移过来。
+const APP_DIR_NAME: &str = "com.noesis.ide";
+
+fn migrate_legacy_data(new_dir: &std::path::Path) -> bool {
+    let Some(data_local) = dirs::data_local_dir() else {
+        return false;
+    };
+    let legacy = data_local.join("noesis");
+    if !legacy.is_dir() || legacy == new_dir {
+        return false;
+    }
+    // 新目录已经有数据库时不覆盖（避免破坏当前数据）
+    if new_dir.join("noesis_local.db").exists() {
+        return false;
+    }
+
+    let _ = std::fs::create_dir_all(new_dir);
+    let mut migrated = false;
+    let candidates = [
+        "noesis_local.db",
+        "noesis_local.db-wal",
+        "noesis_local.db-shm",
+        "credentials.json",
+        "secrets.bin",
+        "settings.json",
+    ];
+    for name in candidates {
+        let src = legacy.join(name);
+        if src.is_file() {
+            let dst = new_dir.join(name);
+            if std::fs::copy(&src, &dst).is_ok() {
+                migrated = true;
+            }
+        }
+    }
+    migrated
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Single Instance File Lock (G1)
@@ -152,18 +216,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trimmed = existing_url.trim();
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
             println!("Noesis 实例已在运行：{}", trimmed);
-            let _ = Command::new("xdg-open").arg(trimmed).spawn();
+            open_app_window(trimmed);
         } else {
             eprintln!("Noesis 另一个实例正在运行中。");
         }
         return Ok(());
     }
 
-    // 2. Initialize AppState
+    // 2. Initialize AppState (H5-a: 统一使用 com.noesis.ide，并自动迁移旧数据)
     let app_data = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("noesis");
+        .join(APP_DIR_NAME);
     let _ = std::fs::create_dir_all(&app_data);
+    let migrated = migrate_legacy_data(&app_data);
     let state = Arc::new(AppState::new(app_data));
     let channels: ChannelMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -181,7 +246,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = lock_file.write_all(url.as_bytes());
     let _ = lock_file.flush();
 
-    println!("NOESIS v0.1.2 (Linux x86_64) running at {}", url);
+    println!("NOESIS v0.1.3 (Linux x86_64) running at {}", url);
+    if migrated {
+        println!("已从旧版本数据目录迁移到 {}", APP_DIR_NAME);
+    }
 
     // 4. Heartbeat Lifecycle (G1)
     LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
@@ -201,12 +269,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 5. Open browser if not headless
+    // 5. Open browser if not headless (H5-b: --app 独立窗口)
     if std::env::var("NOESIS_HEADLESS").is_err() {
         let u = url.clone();
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-            let _ = Command::new("xdg-open").arg(&u).spawn();
+            open_app_window(&u);
         });
     }
 
@@ -225,14 +293,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, channels: ChannelMap) {
-    let mut buffer = vec![0u8; 8192];
-    let bytes_read = match stream.read(&mut buffer).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
+/// H5-e: 先把请求头循环读到 `\r\n\r\n`，再按 `Content-Length` 把请求体读满。
+///
+/// 旧实现固定读 8KB，请求头超过 8KB 或 TCP 分包正好落在请求头中间时就会解析失败，
+/// 表现为大选区解读偶发「Invalid JSON」。
+async fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<(String, Vec<u8>, Vec<u8>), String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
+    let mut chunk = vec![0u8; 16 * 1024];
+
+    // 1. 循环读，直到请求头结束标记出现（不假设一次能读完整个头）
+    let header_end = loop {
+        if let Some(end) = http::header_end_offset(&buf) {
+            break end;
+        }
+        if buf.len() > http::MAX_HEADER_BYTES {
+            return Err("请求头超过 64KB，已拒绝".to_string());
+        }
+        let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("连接在请求头结束前关闭".to_string());
+        }
+        buf.extend_from_slice(&chunk[..n]);
     };
 
-    let req_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let header_bytes = buf[..header_end].to_vec();
+    let header_text = String::from_utf8_lossy(&header_bytes).to_string();
+    let mut body = buf[header_end..].to_vec();
+
+    // 2. 解析 Content-Length
+    let content_length = http::parse_content_length(&header_text);
+
+    // 3. 把请求体读满（可能已经被第一次读带进来一部分）
+    while body.len() < content_length {
+        let need = content_length - body.len();
+        let mut rest = vec![0u8; need.min(1024 * 1024)];
+        let n = stream.read(&mut rest).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&rest[..n]);
+    }
+    let body = http::trim_body(body, content_length);
+
+    Ok((header_text, header_bytes, body))
+}
+
+async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, channels: ChannelMap) {
+    let (req_str, _header_bytes, req_body) = match read_http_request(&mut stream).await {
+        Ok(v) => v,
+        Err(err) => {
+            let resp = format!("HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", err.len(), err);
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return;
+        }
+    };
+
     let mut lines = req_str.lines();
     let request_line = match lines.next() {
         Some(l) => l,
@@ -291,26 +408,8 @@ async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, cha
     // 3. IPC Command Dispatch
     if path == "/__noesis_ipc__" {
         LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
-        let mut body = String::new();
-        if let Some(pos) = req_str.find("\r\n\r\n") {
-            body.push_str(&req_str[pos + 4..]);
-        }
-
-        // Read more if Content-Length exceeds what was read
-        let mut content_length: usize = 0;
-        for line in req_str.lines() {
-            if line.to_lowercase().starts_with("content-length:") {
-                if let Some(len_str) = line.split(':').nth(1) {
-                    content_length = len_str.trim().parse().unwrap_or(0);
-                }
-            }
-        }
-        if body.len() < content_length {
-            let mut remaining = vec![0u8; content_length - body.len()];
-            if stream.read_exact(&mut remaining).await.is_ok() {
-                body.push_str(&String::from_utf8_lossy(&remaining));
-            }
-        }
+        // H5-e: 请求体已在 read_http_request 里按 Content-Length 读满
+        let body = String::from_utf8_lossy(&req_body).to_string();
 
         let parsed: Result<Value, _> = serde_json::from_str(&body);
         let (cmd, args) = match parsed {

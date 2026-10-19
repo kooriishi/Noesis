@@ -31,6 +31,10 @@ export interface AppSettings {
   wordWrap: boolean;
   tabSize: number;
   theme: string;
+  /** H4: 界面字体族 */
+  uiFontFamily?: string;
+  /** H4: 行高 */
+  lineHeight?: number;
 }
 
 export interface SymbolItem {
@@ -397,6 +401,8 @@ export interface ExplanationSummary {
   pinned: boolean;
   created_at: number;
   last_opened_at?: number;
+  group_id?: string | null;
+  layer?: string | null;
 }
 
 export interface PromptPreset {
@@ -464,6 +470,64 @@ export interface AskPreviewResponse {
   token_estimate: number;
   manifest: ContextManifest;
   outbound_preview: OutboundPreview;
+}
+
+export interface LayerQualityReport {
+  passed: boolean;
+  score: number;
+  word_count: number;
+  min_word_count: number;
+  has_mermaid: boolean;
+  line_coverage_percent: number;
+  generic_phrases_count: number;
+  missing_sections: string[];
+  issues: string[];
+}
+
+export interface LayerExplainResponse {
+  layer: PerspectiveType | string;
+  markdown: string;
+  quality: LayerQualityReport;
+  citations: CitationItem[];
+  concepts: string[];
+  cached: boolean;
+  explanation_id?: string;
+  group_id?: string;
+}
+
+export interface LayerStreamEvent {
+  type: 'token' | 'done' | 'error' | string;
+  layer?: string;
+  token?: string;
+  markdown?: string;
+  quality?: LayerQualityReport;
+  citations?: CitationItem[];
+  concepts?: string[];
+  cached?: boolean;
+  explanation_id?: string;
+  group_id?: string;
+  error?: string;
+}
+
+export interface IndexStatus {
+  running: boolean;
+  project_id?: string | null;
+  processed: number;
+  total: number;
+  phase: string;
+}
+
+export interface UiSettings {
+  theme: string;
+  editor_font_size: number;
+  ui_font_size: number;
+  font_family: string;
+  ui_font_family: string;
+  word_wrap: boolean;
+  tab_size: number;
+  line_height: number;
+  last_project?: string | null;
+  recent_projects: string[];
 }
 
 export interface FeedbackStats {

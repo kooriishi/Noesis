@@ -8,7 +8,7 @@ interface InlineProgressProps {
 
 export const InlineProgress: React.FC<InlineProgressProps> = ({
   height = 3,
-  color = 'var(--noesis-accent-blue, #89b4fa)',
+  color = 'var(--noesis-accent-blue)',
   className = '',
 }) => {
   return (
@@ -21,7 +21,7 @@ export const InlineProgress: React.FC<InlineProgressProps> = ({
         position: 'relative',
         width: '100%',
         height: `${height}px`,
-        backgroundColor: 'var(--noesis-bg-surface0, #313244)',
+        backgroundColor: 'var(--noesis-bg-surface0)',
         overflow: 'hidden',
         borderRadius: 'var(--noesis-radius-sm, 4px)',
       }}
