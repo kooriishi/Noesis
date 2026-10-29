@@ -84,6 +84,14 @@ pub struct CodeRunner;
 #[cfg(target_os = "linux")]
 const SANDBOX_SESSION_DIR: &str = "/run/noesis_runner/session";
 
+#[cfg(target_os = "linux")]
+fn system_runtime_program(name: &str) -> Option<PathBuf> {
+    ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|path| path.is_file())
+}
+
 fn runtime_session_dir(host_session_dir: &Path) -> PathBuf {
     #[cfg(target_os = "linux")]
     {
@@ -565,14 +573,54 @@ impl CodeRunner {
         }
         let _guard = DirGuard(session_dir.clone());
 
+        let language = req.language.to_lowercase();
         let (ext, cmd_name, base_args): (&str, String, Vec<String>) =
-            match req.language.to_lowercase().as_str() {
+            match language.as_str() {
                 "javascript" | "js" => ("js", "node".to_string(), vec![]),
                 "python" | "py" => {
                     let (py_bin, py_args) = Self::probe_python_command().await?;
                     ("py", py_bin, py_args)
                 }
-                "typescript" | "ts" => ("ts", "npx".to_string(), vec!["ts-node".to_string()]),
+                "typescript" | "ts" => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let node = system_runtime_program("node").ok_or_else(|| {
+                            RunnerError::InterpreterNotFound(
+                                "System Node.js is required to run TypeScript".to_string(),
+                            )
+                        })?;
+                        let supports_typescript = Command::new(&node)
+                            .args([
+                                "--experimental-strip-types",
+                                "--experimental-transform-types",
+                                "--version",
+                            ])
+                            .output()
+                            .await
+                            .map(|out| out.status.success())
+                            .unwrap_or(false);
+                        if supports_typescript {
+                            (
+                                "ts",
+                                node.to_string_lossy().to_string(),
+                                vec![
+                                    "--experimental-strip-types".to_string(),
+                                    "--experimental-transform-types".to_string(),
+                                ],
+                            )
+                        } else if let Some(ts_node) = system_runtime_program("ts-node") {
+                            ("ts", ts_node.to_string_lossy().to_string(), vec![])
+                        } else {
+                            return Err(RunnerError::InterpreterNotFound(
+                                "TypeScript requires Node.js 22.7+ or a system-installed ts-node".to_string(),
+                            ));
+                        }
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        ("ts", "npx".to_string(), vec!["ts-node".to_string()])
+                    }
+                }
                 _ => {
                     return Err(RunnerError::Unsupported(req.language));
                 }
@@ -700,6 +748,46 @@ mod tests {
         let _ = fs::remove_file(outside_file).await;
         assert!(res.success, "sandboxed runner failed: {:?}", res);
         assert!(res.stdout.contains("hidden"), "host fixture was visible: {:?}", res.stdout);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_typescript_runner_works_without_npx_or_network() {
+        let bwrap_available = env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+            .any(|dir| dir.join("bwrap").is_file());
+        let Some(node) = system_runtime_program("node") else {
+            println!("Skipping TypeScript isolation test: system Node.js is unavailable");
+            return;
+        };
+        let native_typescript = Command::new(&node)
+            .args([
+                "--experimental-strip-types",
+                "--experimental-transform-types",
+                "--version",
+            ])
+            .output()
+            .await
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !bwrap_available || (!native_typescript && system_runtime_program("ts-node").is_none()) {
+            println!("Skipping TypeScript isolation test: bwrap or offline TypeScript runtime is unavailable");
+            return;
+        }
+
+        let res = CodeRunner::execute(RunRequest {
+            language: "typescript".to_string(),
+            code: "enum Mode { Ready = 'TS_ENUM_OK' }\nconst result: Mode = Mode.Ready;\nconsole.log(result);".to_string(),
+            timeout_seconds: Some(10),
+            stdin: None,
+            cpp_standard: None,
+            extra_args: None,
+        })
+        .await
+        .expect("execute TypeScript without downloading dependencies");
+        assert!(res.success, "TypeScript runner failed: {:?}", res);
+        assert!(res.stdout.contains("TS_ENUM_OK"), "unexpected output: {:?}", res.stdout);
     }
 
     #[tokio::test]

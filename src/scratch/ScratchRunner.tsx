@@ -170,7 +170,7 @@ export const ScratchRunner: React.FC<ScratchRunnerProps> = ({
                 <option value="c">C (gcc/clang/MSVC)</option>
                 <option value="python">Python 3 (python3/python/py)</option>
                 <option value="javascript">JavaScript (Node)</option>
-                <option value="typescript">TypeScript (ts-node)</option>
+                <option value="typescript">TypeScript (Node.js)</option>
               </select>
 
               {/* C/C++ Standard Selector */}
