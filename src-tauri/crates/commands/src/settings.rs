@@ -97,7 +97,12 @@ pub async fn get_ui_settings(state: &AppState) -> Result<UiSettings, String> {
 }
 
 /// H4-4: 写入界面设置到应用数据目录下的 `settings.json`。
-pub async fn set_ui_settings(state: &AppState, settings: UiSettings) -> Result<UiSettings, String> {
+pub async fn set_ui_settings(state: &AppState, mut settings: UiSettings) -> Result<UiSettings, String> {
+    // Project history is written by remember_project, not by the appearance UI.
+    // Keep the persisted values so stale/partial frontend settings cannot erase them.
+    let current = read_settings(&state.app_data_dir);
+    settings.last_project = current.last_project;
+    settings.recent_projects = current.recent_projects;
     write_settings(&state.app_data_dir, &settings)?;
     Ok(settings)
 }

@@ -473,12 +473,76 @@ pub async fn index_project(state: Arc<AppState>) -> Result<ProjectMap, String> {
 }
 
 pub async fn get_project_map(state: &AppState) -> Result<Option<ProjectMap>, String> {
-    let map = state
-        .project_map
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
-    Ok(map)
+    let (project_id, project_root) = {
+        let manager = state.project_manager.lock().map_err(|e| e.to_string())?;
+        let Some(pm) = manager.as_ref() else {
+            return Ok(None);
+        };
+        let project_id = pm.normalized_root();
+        let mut map = state.project_map.lock().map_err(|e| e.to_string())?;
+        if let Some(cached) = map.as_ref() {
+            if cached.root == project_id {
+                return Ok(Some(cached.clone()));
+            }
+        }
+        *map = None;
+        (project_id, pm.root_path().to_path_buf())
+    };
+
+    let files = state
+        .store
+        .list_project_files(&project_id)
+        .map_err(|e| e.to_string())?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    // Restore detected domains from lightweight adapter detection and persisted entities.
+    let entities = state
+        .store
+        .get_entities_by_domain(&project_id, None, None)
+        .map_err(|e| e.to_string())?;
+    let mut detected_domains = Vec::new();
+    let ros2_adapter = Ros2Adapter::new();
+    let llmapp_adapter = LlmAppAdapter::new();
+    let adapters: [&dyn DomainAdapter; 2] = [&ros2_adapter, &llmapp_adapter];
+    for adapter in adapters {
+        if adapter.detect(&project_root) {
+            let domain = adapter.domain_id().to_string();
+            if !detected_domains.contains(&domain) {
+                detected_domains.push(domain);
+            }
+        }
+    }
+    for entity in entities {
+        if entity.domain != "generic" && !detected_domains.contains(&entity.domain) {
+            detected_domains.push(entity.domain);
+        }
+    }
+
+    let restored = state
+        .indexer
+        .build_project_map_from_store(&project_id, &detected_domains, files.len(), 0, &state.store)
+        .map_err(|e| e.to_string())?;
+
+    // Only cache a rebuilt map if this project is still active; otherwise a late
+    // restore could replace the map for a project opened concurrently.
+    let manager = state.project_manager.lock().map_err(|e| e.to_string())?;
+    if !manager
+        .as_ref()
+        .map(|pm| pm.normalized_root() == project_id)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let mut map = state.project_map.lock().map_err(|e| e.to_string())?;
+    if let Some(cached) = map.as_ref() {
+        if cached.root == project_id {
+            return Ok(Some(cached.clone()));
+        }
+    }
+    *map = Some(restored.clone());
+    Ok(Some(restored))
 }
 
 pub async fn set_reading_step_status(
@@ -2585,14 +2649,14 @@ pub async fn dispatch(
         "mark_confusion" => {
             let fp = args["filePath"].as_str().or_else(|| args["file_path"].as_str()).unwrap_or_default().to_string();
             let snippet = args["snippet"].as_str().unwrap_or_default().to_string();
-            let perspective = args["cardPerspective"].as_str().or_else(|| args["card_perspective"].as_str()).or_else(|| args["perspective"].as_str()).unwrap_or("整体").to_string();
-            let note = args["note"].as_str().map(|s| s.to_string());
+            let perspective = args["category"].as_str().or_else(|| args["cardPerspective"].as_str()).or_else(|| args["card_perspective"].as_str()).or_else(|| args["perspective"].as_str()).unwrap_or("整体").to_string();
+            let note = args["userNote"].as_str().or_else(|| args["user_note"].as_str()).or_else(|| args["note"].as_str()).map(|s| s.to_string());
             let range: (u32, u32) = if let Some(arr) = args["range"].as_array() {
                 (arr.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                  arr.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32)
             } else {
-                (args["lineStart"].as_u64().or_else(|| args["line_start"].as_u64()).unwrap_or(0) as u32,
-                 args["lineEnd"].as_u64().or_else(|| args["line_end"].as_u64()).unwrap_or(0) as u32)
+                (args["startLine"].as_u64().or_else(|| args["start_line"].as_u64()).or_else(|| args["lineStart"].as_u64()).or_else(|| args["line_start"].as_u64()).unwrap_or(0) as u32,
+                 args["endLine"].as_u64().or_else(|| args["end_line"].as_u64()).or_else(|| args["lineEnd"].as_u64()).or_else(|| args["line_end"].as_u64()).unwrap_or(0) as u32)
             };
             let res = mark_confusion(state, fp, range.0, range.1, snippet, perspective, note).await?;
             Ok(serde_json::to_value(res).unwrap())
@@ -2905,6 +2969,36 @@ mod tests {
         assert!(err.contains("Unsupported layer"), "实际错误: {}", err);
     }
 
+    #[test]
+    fn dispatch_mark_confusion_preserves_frontend_field_names() {
+        let dir = std::env::temp_dir().join(format!("noesis-mark-dispatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Arc::new(AppState::new(dir.clone()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(dispatch(
+            "mark_confusion",
+            &state,
+            serde_json::json!({
+                "filePath": "src/main.rs",
+                "startLine": 1,
+                "endLine": 6,
+                "snippet": "fn main() {}",
+                "category": "logic",
+                "userNote": "Explain the control flow"
+            }),
+            None,
+        ))
+        .expect("dispatch frontend mark payload");
+
+        let marks = state.store.list_marks(None, None).expect("read saved marks");
+        let mark = marks.first().expect("mark should be stored");
+        assert_eq!(mark.category, "logic");
+        assert_eq!(mark.line_start, 1);
+        assert_eq!(mark.line_end, 6);
+        assert_eq!(mark.user_note.as_deref(), Some("Explain the control flow"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // H2: 索引任务按项目管理、可取消、只写自己的地图
     // ---------------------------------------------------------------------------------------------
@@ -2923,6 +3017,52 @@ mod tests {
             "cmake_minimum_required(VERSION 3.10)\nproject(demo)\n",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn project_map_is_restored_from_store_after_reopen() {
+        let base = std::env::temp_dir().join(format!("noesis-map-restore-{}", std::process::id()));
+        let project = base.join("project");
+        let app_data = base.join("appdata");
+        let _ = std::fs::remove_dir_all(&base);
+        write_sample_project(&project, "map_node.cpp", "map_node");
+        std::fs::create_dir_all(&app_data).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let project_id;
+
+        {
+            let state = Arc::new(AppState::new(app_data.clone()));
+            let tree = rt
+                .block_on(open_project(&state, project.to_string_lossy().to_string()))
+                .expect("open project before indexing");
+            project_id = tree.absolute_path;
+            assert!(rt.block_on(get_project_map(&state)).unwrap().is_none());
+
+            let generated = rt
+                .block_on(index_project(Arc::clone(&state)))
+                .expect("index project");
+            assert!(generated.total_symbols > 0, "fixture should produce symbols");
+        }
+
+        let reopened = AppState::new(app_data);
+        let tree = rt
+            .block_on(open_project(&reopened, project.to_string_lossy().to_string()))
+            .expect("reopen project after restarting state");
+        assert_eq!(tree.absolute_path, project_id);
+        assert!(reopened.project_map.lock().unwrap().is_none());
+
+        let restored = rt
+            .block_on(get_project_map(&reopened))
+            .expect("load restored map")
+            .expect("indexed map should be rebuilt from SQLite");
+        assert_eq!(restored.root, project_id);
+        assert!(restored.total_symbols > 0);
+        assert!(restored.modules.iter().any(|m| m.path == "src/map_node.cpp"));
+        assert_eq!(
+            reopened.project_map.lock().unwrap().as_ref().map(|map| map.root.as_str()),
+            Some(project_id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -3163,8 +3303,12 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(async {
+            remember_project(&state, "/tmp/noesis-recent-a").await.unwrap();
+            remember_project(&state, "/tmp/noesis-recent-b").await.unwrap();
             let mut s = get_ui_settings(&state).await.expect("default settings");
             assert_eq!(s.theme, "catppuccin");
+            s.last_project = None;
+            s.recent_projects.clear();
             assert_eq!(s.tab_size, 4);
 
             s.theme = "dracula".to_string();
@@ -3174,6 +3318,11 @@ mod tests {
 
             let again = get_ui_settings(&state).await.expect("reload settings");
             assert_eq!(again.theme, "dracula");
+            assert_eq!(again.last_project.as_deref(), Some("/tmp/noesis-recent-b"));
+            assert_eq!(
+                again.recent_projects,
+                vec!["/tmp/noesis-recent-b".to_string(), "/tmp/noesis-recent-a".to_string()]
+            );
             assert_eq!(again.ui_font_size, 15);
             assert_eq!(again.font_family, "\"Fira Code\", monospace");
         });
