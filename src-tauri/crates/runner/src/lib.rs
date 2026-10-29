@@ -108,19 +108,20 @@ fn command_for_session(program: &str, host_session_dir: &Path) -> Result<Command
         }
 
         let mut cmd = Command::new("bwrap");
-        cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--ro-bind", "/", "/"])
-            .args(["--tmpfs", "/run", "--dir", "/run/noesis_runner"])
+        cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--tmpfs", "/"]);
+        for runtime_dir in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+            if Path::new(runtime_dir).exists() {
+                cmd.arg("--dir")
+                    .arg(runtime_dir)
+                    .arg("--ro-bind")
+                    .arg(runtime_dir)
+                    .arg(runtime_dir);
+            }
+        }
+        cmd.args(["--tmpfs", "/tmp", "--tmpfs", "/run", "--dir", "/run/noesis_runner"])
             .arg("--bind")
             .arg(host_session_dir)
             .arg(SANDBOX_SESSION_DIR);
-        for private_dir in [
-            "/home", "/root", "/tmp", "/var", "/workspace", "/workspaces",
-            "/mnt", "/media", "/srv", "/opt",
-        ] {
-            if Path::new(private_dir).exists() {
-                cmd.arg("--tmpfs").arg(private_dir);
-            }
-        }
         cmd.args(["--proc", "/proc", "--dev", "/dev"])
             .args(["--chdir", SANDBOX_SESSION_DIR, "--clearenv", "--setenv", "HOME", "/tmp"])
             .args(["--setenv", "TMPDIR", "/tmp", "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--", program])
@@ -667,7 +668,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn linux_runner_cannot_read_host_temp_files() {
+    async fn linux_runner_cannot_read_files_outside_session() {
         let bwrap_available = env::var_os("PATH")
             .into_iter()
             .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
@@ -685,7 +686,7 @@ mod tests {
         fs::write(&outside_file, "OUTSIDE_RUNTIME_SECRET").await.expect("write host-only fixture");
         let path_literal = serde_json::to_string(&outside_file.to_string_lossy().to_string()).unwrap();
         let code = format!(
-            "const fs = require('fs'); let visible = false; try {{ visible = fs.readFileSync({}, 'utf8').includes('OUTSIDE_RUNTIME_SECRET'); }} catch (e) {{ if (e.code !== 'ENOENT') throw e; }} console.log(visible ? 'visible' : 'hidden');",
+            "const fs = require('fs'); let visible = false; for (const p of [{}, '/etc/passwd']) {{ try {{ fs.readFileSync(p); visible = true; }} catch (e) {{ if (e.code !== 'ENOENT') throw e; }} }} console.log(visible ? 'visible' : 'hidden');",
             path_literal
         );
         let res = CodeRunner::execute(RunRequest {
