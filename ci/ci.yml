@@ -47,7 +47,8 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            bubblewrap
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

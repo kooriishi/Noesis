@@ -127,6 +127,7 @@ Section: devel
 Priority: optional
 Architecture: amd64
 Installed-Size: ${installedSizeKb}
+Depends: bubblewrap
 Maintainer: Noesis Team <team@noesis.ide>
 Homepage: https://github.com/kooriishi/Noesis
 Description: NOESIS - Code-Learning Desktop IDE

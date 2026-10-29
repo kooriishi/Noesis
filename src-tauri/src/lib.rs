@@ -81,13 +81,13 @@ async fn get_project_tree(state: State<'_, Arc<AppState>>) -> Result<Option<File
 }
 
 #[tauri::command]
-async fn read_file(path: String, state: State<'_, Arc<AppState>>) -> Result<FileContentPayload, String> {
-    noesis_commands::read_file(&state, path).await
+async fn read_file(path: String, project_id: String, state: State<'_, Arc<AppState>>) -> Result<FileContentPayload, String> {
+    noesis_commands::read_file(&state, path, project_id).await
 }
 
 #[tauri::command]
-async fn save_file(path: String, content: String, state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    noesis_commands::save_file(&state, path, content).await
+async fn save_file(path: String, content: String, project_id: String, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    noesis_commands::save_file(&state, path, content, project_id).await
 }
 
 #[tauri::command]

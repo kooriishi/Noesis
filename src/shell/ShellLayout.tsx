@@ -16,7 +16,7 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
-import { CodeEditor, evictEditorStateCache } from '../editor/CodeEditor';
+import { CodeEditor, evictEditorStateCache, evictProjectEditorStateCache } from '../editor/CodeEditor';
 import { ProjectSidebar } from '../sidebar-project/ProjectSidebar';
 import { AiSidebar } from '../sidebar-ai/AiSidebar';
 import { ScratchRunner } from '../scratch/ScratchRunner';
@@ -153,6 +153,8 @@ export const ShellLayout: React.FC = () => {
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
   const [tabBarEpoch, setTabBarEpoch] = useState<number>(0);
   const hasInitializedRef = useRef<boolean>(false);
+  const activeProjectIdRef = useRef<string | null>(null);
+  const projectOpenRequestRef = useRef(0);
 
   // Project & Map State
   const [currentProject, setCurrentProject] = useState<FileNode | null>(null);
@@ -264,7 +266,9 @@ export const ShellLayout: React.FC = () => {
     });
   };
 
-  const activeTab = tabs.find((t) => t.path === activeTabPath);
+  const activeTab = tabs.find(
+    (t) => t.projectId === currentProject?.absolute_path && t.path === activeTabPath
+  );
 
   // Keyboard shortcut Ctrl+, for settings
   useEffect(() => {
@@ -411,23 +415,27 @@ export const ShellLayout: React.FC = () => {
     try {
       const targetPath = path || (await ApiService.selectDirectory());
       if (!targetPath) return;
+      const requestId = ++projectOpenRequestRef.current;
 
       const tree = await ApiService.openProject(targetPath);
+      if (requestId !== projectOpenRequestRef.current) return;
+      const previousProjectId = activeProjectIdRef.current;
+      if (previousProjectId) evictProjectEditorStateCache(previousProjectId);
+      activeProjectIdRef.current = tree.absolute_path;
       setCurrentProject(tree);
-      lastProjectRef.current = targetPath;
+      lastProjectRef.current = tree.absolute_path;
       if (!options.silent) {
         toast.success(`成功载入项目: ${tree.name || targetPath}`);
       }
 
-      // When switching to a new project directory, clear stale tabs from previous workspace
-      evictEditorStateCache();
+      // Tabs are project-scoped; evict the previous project's state before its editor unmounts.
       setTabs([]);
       setActiveTabPath(null);
       setTabBarEpoch((n) => n + 1);
 
       const first = findFirstFile(tree);
       if (first) {
-        await handleOpenFile(first.path);
+        await handleOpenFile(first.path, tree.absolute_path);
       }
 
       // H2-5: 不再静默自动索引。已有索引就直接加载旧地图，否则提示用户手动开始。
@@ -496,17 +504,21 @@ export const ShellLayout: React.FC = () => {
     return null;
   };
 
-  const handleOpenFile = async (filePath: string) => {
-    const existing = tabs.find((t) => t.path === filePath);
+  const handleOpenFile = async (filePath: string, requestedProjectId?: string | number) => {
+    const projectId = typeof requestedProjectId === 'string' ? requestedProjectId : activeProjectIdRef.current;
+    if (!projectId || activeProjectIdRef.current !== projectId) return;
+    const existing = tabs.find((t) => t.projectId === projectId && t.path === filePath);
     if (existing) {
       setActiveTabPath(filePath);
       return;
     }
 
     try {
-      const payload = await ApiService.readFile(filePath);
+      const payload = await ApiService.readFile(filePath, projectId);
+      if (activeProjectIdRef.current !== projectId) return;
       const name = filePath.split('/').pop() || filePath;
       const newTab: TabItem = {
+        projectId,
         path: filePath,
         name,
         content: payload.content,
@@ -515,11 +527,12 @@ export const ShellLayout: React.FC = () => {
       };
 
       setTabs((prev) => {
-        // Deduplicate by path to prevent duplicate React keys under concurrent calls
+        // Deduplicate by project and path to prevent cross-project filename collisions.
         const deduped = prev.filter(
-          (t, idx, arr) => arr.findIndex((item) => item.path === t.path) === idx
+          (t, idx, arr) =>
+            arr.findIndex((item) => item.projectId === t.projectId && item.path === t.path) === idx
         );
-        if (deduped.some((t) => t.path === filePath)) {
+        if (deduped.some((t) => t.projectId === projectId && t.path === filePath)) {
           return deduped;
         }
         return [...deduped, newTab];
@@ -547,7 +560,9 @@ export const ShellLayout: React.FC = () => {
       e.stopPropagation();
     }
 
-    const targetTab = tabs.find((t) => t.path === filePath);
+    const targetTab = tabs.find(
+      (t) => t.projectId === activeProjectIdRef.current && t.path === filePath
+    );
     if (targetTab?.isDirty) {
       const confirmClose = window.confirm(
         `文件 "${targetTab.name}" 有未保存的修改，关闭将丢失这些修改。确定关闭吗？`
@@ -555,7 +570,7 @@ export const ShellLayout: React.FC = () => {
       if (!confirmClose) return;
     }
 
-    evictEditorStateCache(filePath);
+    if (targetTab) evictEditorStateCache(`${targetTab.projectId}\0${filePath}`);
     // Bump tabBarEpoch to force clean reconciliation even if duplicate keys existed prior to HMR
     setTabBarEpoch((n) => n + 1);
 
@@ -578,11 +593,11 @@ export const ShellLayout: React.FC = () => {
     });
   };
 
-  const handleActiveContentChange = (newContent: string) => {
-    if (!activeTabPath) return;
+  const handleActiveContentChange = (newContent: string, projectId: string, filePath: string) => {
+    if (projectId !== activeProjectIdRef.current) return;
     setTabs((prev) =>
       prev.map((t) =>
-        t.path === activeTabPath && t.content !== newContent
+        t.projectId === projectId && t.path === filePath && t.content !== newContent
           ? { ...t, content: newContent, isDirty: true }
           : t
       )
@@ -590,19 +605,29 @@ export const ShellLayout: React.FC = () => {
   };
 
 
-  const handleSaveActiveFile = async (latestContent?: string) => {
-    if (!activeTab) return;
-    const contentToSave = latestContent !== undefined ? latestContent : activeTab.content;
+  const handleSaveActiveFile = async (
+    latestContent?: string,
+    expectedProjectId?: string,
+    expectedFilePath?: string
+  ) => {
+    const projectId = expectedProjectId ?? activeProjectIdRef.current;
+    const filePath = expectedFilePath ?? activeTab?.path;
+    if (!projectId || !filePath || projectId !== activeProjectIdRef.current) return;
+    const targetTab = tabs.find((t) => t.projectId === projectId && t.path === filePath);
+    if (!targetTab) return;
+    const contentToSave = latestContent !== undefined ? latestContent : targetTab.content;
     try {
-      await ApiService.saveFile(activeTab.path, contentToSave);
+      await ApiService.saveFile(targetTab.path, contentToSave, projectId);
       setTabs((prev) =>
         prev.map((t) =>
-          t.path === activeTab.path ? { ...t, content: contentToSave, isDirty: false } : t
+          t.projectId === projectId && t.path === filePath && t.content === contentToSave
+            ? { ...t, isDirty: false }
+            : t
         )
       );
-      toast.success(`文件已保存: ${activeTab.name}`);
+      if (activeProjectIdRef.current === projectId) toast.success(`文件已保存: ${targetTab.name}`);
     } catch (err: any) {
-      toast.error(`保存失败: ${err?.message || String(err)}`);
+      if (activeProjectIdRef.current === projectId) toast.error(`保存失败: ${err?.message || String(err)}`);
     }
   };
 
@@ -991,6 +1016,7 @@ export const ShellLayout: React.FC = () => {
   };
 
   const isKeyConfigured = Boolean(llmConfig.has_api_key || llmConfig.api_key.trim().length > 5);
+  const editorCacheKey = activeTab ? `${activeTab.projectId}\0${activeTab.path}` : '';
 
   return (
     <div
@@ -1359,6 +1385,9 @@ export const ShellLayout: React.FC = () => {
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
             {activeTab ? (
               <CodeEditor
+                key={editorCacheKey}
+                projectId={activeTab.projectId}
+                cacheKey={editorCacheKey}
                 filePath={activeTab.path}
                 initialContent={activeTab.content}
                 language={activeTab.language}

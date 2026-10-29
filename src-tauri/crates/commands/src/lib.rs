@@ -303,18 +303,31 @@ pub async fn get_project_tree(state: &AppState) -> Result<Option<FileNode>, Stri
     }
 }
 
-pub async fn read_file(state: &AppState, path: String) -> Result<FileContentPayload, String> {
+fn ensure_active_project(pm: &ProjectManager, requested_project_id: &str) -> Result<(), String> {
+    let active_project_id = pm.normalized_root();
+    if active_project_id != requested_project_id {
+        return Err(format!(
+            "项目已切换：请求属于 {}，当前项目是 {}。请重新打开文件。",
+            requested_project_id, active_project_id
+        ));
+    }
+    Ok(())
+}
+
+pub async fn read_file(state: &AppState, path: String, project_id: String) -> Result<FileContentPayload, String> {
     let mgr_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     if let Some(pm) = mgr_guard.as_ref() {
+        ensure_active_project(pm, &project_id)?;
         pm.read_file(&path).map_err(|e| e.to_string())
     } else {
         Err("尚未打开任何工程，请先在左侧选择工程目录。".to_string())
     }
 }
 
-pub async fn save_file(state: &AppState, path: String, content: String) -> Result<String, String> {
+pub async fn save_file(state: &AppState, path: String, content: String, project_id: String) -> Result<String, String> {
     let mgr_guard = state.project_manager.lock().map_err(|e| e.to_string())?;
     if let Some(pm) = mgr_guard.as_ref() {
+        ensure_active_project(pm, &project_id)?;
         pm.save_file(&path, &content).map_err(|e| e.to_string())
     } else {
         Err("尚未打开任何工程，无法保存文件。".to_string())
@@ -2463,13 +2476,15 @@ pub async fn dispatch(
         }
         "read_file" => {
             let path = args["path"].as_str().unwrap_or_default().to_string();
-            let res = read_file(state, path).await?;
+            let project_id = args["projectId"].as_str().or_else(|| args["project_id"].as_str()).unwrap_or_default().to_string();
+            let res = read_file(state, path, project_id).await?;
             Ok(serde_json::to_value(res).unwrap())
         }
         "save_file" => {
             let path = args["path"].as_str().unwrap_or_default().to_string();
             let content = args["content"].as_str().unwrap_or_default().to_string();
-            let res = save_file(state, path, content).await?;
+            let project_id = args["projectId"].as_str().or_else(|| args["project_id"].as_str()).unwrap_or_default().to_string();
+            let res = save_file(state, path, content, project_id).await?;
             Ok(Value::String(res))
         }
         "index_project" => {
@@ -2908,6 +2923,64 @@ mod tests {
             "cmake_minimum_required(VERSION 3.10)\nproject(demo)\n",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn file_commands_reject_stale_project_identity() {
+        let base = std::env::temp_dir().join(format!("noesis-file-scope-{}", std::process::id()));
+        let proj_a = base.join("project_a");
+        let proj_b = base.join("project_b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+        std::fs::write(proj_a.join("main.rs"), "fn project_a() {}\n").unwrap();
+        std::fs::write(proj_b.join("main.rs"), "fn project_b() {}\n").unwrap();
+
+        let state = Arc::new(AppState::new(base.join("appdata")));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tree_a = open_project(&state, proj_a.to_string_lossy().to_string())
+                .await
+                .expect("open A");
+            let project_id_a = tree_a.absolute_path;
+            let payload_a = read_file(&state, "main.rs".to_string(), project_id_a.clone())
+                .await
+                .expect("read A");
+            assert!(payload_a.content.contains("project_a"));
+
+            let tree_b = open_project(&state, proj_b.to_string_lossy().to_string())
+                .await
+                .expect("open B");
+            let project_id_b = tree_b.absolute_path;
+            let stale_read = read_file(&state, "main.rs".to_string(), project_id_a.clone())
+                .await
+                .expect_err("A's stale read must not be redirected to B");
+            assert!(stale_read.contains("项目已切换"));
+            let stale_save = save_file(
+                &state,
+                "main.rs".to_string(),
+                "fn stale_content() {}\n".to_string(),
+                project_id_a,
+            )
+            .await
+            .expect_err("A's stale save must not overwrite B");
+            assert!(stale_save.contains("项目已切换"));
+            assert_eq!(std::fs::read_to_string(proj_b.join("main.rs")).unwrap(), "fn project_b() {}\n");
+
+            save_file(
+                &state,
+                "main.rs".to_string(),
+                "fn project_b_updated() {}\n".to_string(),
+                project_id_b,
+            )
+            .await
+            .expect("B's active save");
+            assert_eq!(
+                std::fs::read_to_string(proj_b.join("main.rs")).unwrap(),
+                "fn project_b_updated() {}\n"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// H2 验收：A 项目索引进行中时打开 B 项目并索引，B 成功，A 的结果不写进 project_map。

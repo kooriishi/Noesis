@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -25,6 +25,8 @@ pub enum RunnerError {
     InterpreterNotFound(String),
     #[error("Compiler not found: {0}")]
     CompilerNotFound(String),
+    #[error("Linux code execution requires bubblewrap (bwrap); refusing to run without filesystem isolation")]
+    SandboxUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,60 @@ static DETECTED_CPP_COMPILER: OnceLock<Option<CompilerConfig>> = OnceLock::new()
 static DETECTED_C_COMPILER: OnceLock<Option<CompilerConfig>> = OnceLock::new();
 
 pub struct CodeRunner;
+
+#[cfg(target_os = "linux")]
+const SANDBOX_SESSION_DIR: &str = "/run/noesis_runner/session";
+
+fn runtime_session_dir(host_session_dir: &Path) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = host_session_dir;
+        PathBuf::from(SANDBOX_SESSION_DIR)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        host_session_dir.to_path_buf()
+    }
+}
+
+fn command_for_session(program: &str, host_session_dir: &Path) -> Result<Command, RunnerError> {
+    #[cfg(target_os = "linux")]
+    {
+        let has_bwrap = env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+            .any(|dir| dir.join("bwrap").is_file());
+        if !has_bwrap {
+            return Err(RunnerError::SandboxUnavailable);
+        }
+
+        let mut cmd = Command::new("bwrap");
+        cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--ro-bind", "/", "/"])
+            .args(["--tmpfs", "/run", "--dir", "/run/noesis_runner"])
+            .arg("--bind")
+            .arg(host_session_dir)
+            .arg(SANDBOX_SESSION_DIR);
+        for private_dir in [
+            "/home", "/root", "/tmp", "/var", "/workspace", "/workspaces",
+            "/mnt", "/media", "/srv", "/opt",
+        ] {
+            if Path::new(private_dir).exists() {
+                cmd.arg("--tmpfs").arg(private_dir);
+            }
+        }
+        cmd.args(["--proc", "/proc", "--dev", "/dev"])
+            .args(["--chdir", SANDBOX_SESSION_DIR, "--clearenv", "--setenv", "HOME", "/tmp"])
+            .args(["--setenv", "TMPDIR", "/tmp", "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--", program])
+            .kill_on_drop(true);
+        Ok(cmd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cmd = Command::new(program);
+        cmd.current_dir(host_session_dir).kill_on_drop(true);
+        Ok(cmd)
+    }
+}
 
 impl CodeRunner {
     /// Probes local Python interpreter in order: `python3` -> `python` -> `py -3`
@@ -336,7 +392,9 @@ impl CodeRunner {
         let src_filename = if is_cpp { "main.cpp" } else { "main.c" };
         let src_path = session_dir.join(src_filename);
         let out_bin_name = if cfg!(windows) { "main.exe" } else { "main" };
-        let out_bin_path = session_dir.join(out_bin_name);
+        let runtime_dir = runtime_session_dir(&session_dir);
+        let runtime_src_path = runtime_dir.join(src_filename);
+        let runtime_out_bin_path = runtime_dir.join(out_bin_name);
 
         fs::write(&src_path, &req.code).await?;
 
@@ -352,8 +410,7 @@ impl CodeRunner {
         let compile_start = Instant::now();
         let compile_res = match &compiler_cfg.kind {
             CompilerKind::GccLike { bin } => {
-                let mut cmd = Command::new(bin);
-                cmd.current_dir(&session_dir);
+                let mut cmd = command_for_session(bin, &session_dir)?;
                 cmd.arg(std_flag);
                 cmd.args(["-O0", "-g", "-Wall", "-Wextra"]);
                 if let Some(extra) = &req.extra_args {
@@ -361,16 +418,15 @@ impl CodeRunner {
                         cmd.arg(arg);
                     }
                 }
-                cmd.arg(&src_path);
+                cmd.arg(&runtime_src_path);
                 cmd.arg("-o");
-                cmd.arg(&out_bin_path);
+                cmd.arg(&runtime_out_bin_path);
                 cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
                 timeout(Duration::from_secs(COMPILE_TIMEOUT_SECONDS), cmd.output()).await
             }
             CompilerKind::ClDirect { bin } => {
-                let mut cmd = Command::new(bin);
-                cmd.current_dir(&session_dir);
+                let mut cmd = command_for_session(bin, &session_dir)?;
                 let cl_std = match std_flag {
                     "-std=c++14" => "/std:c++14",
                     "-std=c++20" => "/std:c++20",
@@ -384,7 +440,7 @@ impl CodeRunner {
                         cmd.arg(arg);
                     }
                 }
-                cmd.arg(&src_path);
+                cmd.arg(&runtime_src_path);
                 cmd.arg(format!("/Fe:{}", out_bin_name));
                 cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
@@ -403,11 +459,10 @@ impl CodeRunner {
                     vcvars_bat.to_string_lossy(),
                     cl_std,
                     extra_args_str,
-                    src_path.to_string_lossy(),
+                    runtime_src_path.to_string_lossy(),
                     out_bin_name
                 );
-                let mut cmd = Command::new("cmd.exe");
-                cmd.current_dir(&session_dir);
+                let mut cmd = command_for_session("cmd.exe", &session_dir)?;
                 cmd.args(["/c", &cmd_line]);
                 cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
@@ -441,8 +496,8 @@ impl CodeRunner {
 
         // 2. Run Phase
         let _run_start = Instant::now();
-        let mut child = Command::new(&out_bin_path);
-        child.current_dir(&session_dir);
+        let runtime_binary = runtime_out_bin_path.to_string_lossy().to_string();
+        let mut child = command_for_session(&runtime_binary, &session_dir)?;
         child.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
         if req.stdin.is_some() {
@@ -491,13 +546,23 @@ impl CodeRunner {
         let timeout_secs = req.timeout_seconds.unwrap_or(30);
         let start = Instant::now();
 
-        let temp_dir = env::temp_dir().join("noesis_runner");
-        fs::create_dir_all(&temp_dir).await?;
+        let temp_root = env::temp_dir().join("noesis_runner");
+        fs::create_dir_all(&temp_root).await?;
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+
+        let session_dir = temp_root.join(format!("session_{}_{}", std::process::id(), timestamp));
+        fs::create_dir_all(&session_dir).await?;
+        struct DirGuard(PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = DirGuard(session_dir.clone());
 
         let (ext, cmd_name, base_args): (&str, String, Vec<String>) =
             match req.language.to_lowercase().as_str() {
@@ -512,14 +577,17 @@ impl CodeRunner {
                 }
             };
 
-        let script_file = temp_dir.join(format!("scratch_{}.{}", timestamp, ext));
+        let script_file = session_dir.join(format!("scratch_{}.{}", timestamp, ext));
         fs::write(&script_file, req.code).await?;
+        let runtime_script_file = runtime_session_dir(&session_dir).join(
+            script_file.file_name().expect("script filename"),
+        );
 
-        let mut cmd = Command::new(&cmd_name);
+        let mut cmd = command_for_session(&cmd_name, &session_dir)?;
         for a in base_args {
             cmd.arg(a);
         }
-        cmd.arg(&script_file)
+        cmd.arg(&runtime_script_file)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -595,6 +663,42 @@ mod tests {
             let res = CodeRunner::execute(req).await;
             assert!(matches!(res, Err(RunnerError::Timeout(1))));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_runner_cannot_read_host_temp_files() {
+        let bwrap_available = env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+            .any(|dir| dir.join("bwrap").is_file());
+        if !bwrap_available || std::process::Command::new("node").arg("--version").output().is_err() {
+            println!("Skipping Linux isolation test: bwrap or Node.js is unavailable");
+            return;
+        }
+
+        let outside_file = env::temp_dir().join(format!(
+            "noesis-runner-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::write(&outside_file, "OUTSIDE_RUNTIME_SECRET").await.expect("write host-only fixture");
+        let path_literal = serde_json::to_string(&outside_file.to_string_lossy().to_string()).unwrap();
+        let code = format!(
+            "const fs = require('fs'); let visible = false; try {{ visible = fs.readFileSync({}, 'utf8').includes('OUTSIDE_RUNTIME_SECRET'); }} catch (e) {{ if (e.code !== 'ENOENT') throw e; }} console.log(visible ? 'visible' : 'hidden');",
+            path_literal
+        );
+        let res = CodeRunner::execute(RunRequest {
+            language: "javascript".to_string(),
+            code,
+            timeout_seconds: Some(10),
+            stdin: None,
+            cpp_standard: None,
+            extra_args: None,
+        }).await.expect("execute isolated JavaScript");
+        let _ = fs::remove_file(outside_file).await;
+        assert!(res.success, "sandboxed runner failed: {:?}", res);
+        assert!(res.stdout.contains("hidden"), "host fixture was visible: {:?}", res.stdout);
     }
 
     #[tokio::test]

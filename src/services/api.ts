@@ -183,9 +183,9 @@ export const ApiService = {
     return null;
   },
 
-  async readFile(path: string): Promise<FileContentPayload> {
+  async readFile(path: string, projectId: string): Promise<FileContentPayload> {
     if (isTauriEnv()) {
-      return await invoke<FileContentPayload>('read_file', { path });
+      return await invoke<FileContentPayload>('read_file', { path, projectId });
     }
     return {
       path,
@@ -196,9 +196,9 @@ export const ApiService = {
     };
   },
 
-  async saveFile(path: string, content: string): Promise<string> {
+  async saveFile(path: string, content: string, projectId: string): Promise<string> {
     if (isTauriEnv()) {
-      return await invoke<string>('save_file', { path, content });
+      return await invoke<string>('save_file', { path, content, projectId });
     }
     return 'mock-saved-hash';
   },

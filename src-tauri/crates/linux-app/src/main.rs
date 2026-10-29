@@ -286,8 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok((stream, _)) = listener.accept().await {
             let st = Arc::clone(&state);
             let ch = Arc::clone(&channels);
+            let request_origin = url.clone();
             tokio::spawn(async move {
-                handle_http_connection(stream, st, ch).await;
+                handle_http_connection(stream, st, ch, &request_origin).await;
             });
         }
     }
@@ -340,7 +341,7 @@ async fn read_http_request(
     Ok((header_text, header_bytes, body))
 }
 
-async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, channels: ChannelMap) {
+async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, channels: ChannelMap, allowed_origin: &str) {
     let (req_str, _header_bytes, req_body) = match read_http_request(&mut stream).await {
         Ok(v) => v,
         Err(err) => {
@@ -356,6 +357,11 @@ async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, cha
         None => return,
     };
 
+    if !http::origin_is_allowed(&req_str, allowed_origin) {
+        send_http_response(&mut stream, 403, "text/plain; charset=utf-8", b"Cross-origin requests are not allowed.").await;
+        return;
+    }
+
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return;
@@ -370,7 +376,7 @@ async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, cha
     // 1. Heartbeat
     if path == "/__noesis_heartbeat__" {
         LAST_HEARTBEAT.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
-        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\n\r\nok";
+        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok";
         let _ = stream.write_all(resp.as_bytes()).await;
         return;
     }
@@ -391,7 +397,7 @@ async fn handle_http_connection(mut stream: TcpStream, state: Arc<AppState>, cha
         let tx = get_or_create_channel(&channels, &channel_id);
         let mut rx = tx.subscribe();
 
-        let sse_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+        let sse_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
         if stream.write_all(sse_headers.as_bytes()).await.is_err() {
             return;
         }
@@ -607,11 +613,12 @@ async fn send_http_response(stream: &mut TcpStream, status: u16, content_type: &
     let status_line = match status {
         200 => "HTTP/1.1 200 OK",
         400 => "HTTP/1.1 400 Bad Request",
+        403 => "HTTP/1.1 403 Forbidden",
         404 => "HTTP/1.1 404 Not Found",
         _ => "HTTP/1.1 500 Internal Server Error",
     };
     let header = format!(
-        "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        "{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_line,
         content_type,
         body.len()

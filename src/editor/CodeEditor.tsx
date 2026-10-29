@@ -58,6 +58,7 @@ interface CachedEditorEntry {
 }
 
 const editorStateCache = new Map<string, CachedEditorEntry>();
+const projectCacheEpoch = new Map<string, number>();
 
 export function evictEditorStateCache(filePath?: string) {
   if (filePath) {
@@ -67,7 +68,17 @@ export function evictEditorStateCache(filePath?: string) {
   }
 }
 
+export function evictProjectEditorStateCache(projectId: string) {
+  const prefix = `${projectId}\0`;
+  for (const key of editorStateCache.keys()) {
+    if (key.startsWith(prefix)) editorStateCache.delete(key);
+  }
+  projectCacheEpoch.set(projectId, (projectCacheEpoch.get(projectId) || 0) + 1);
+}
+
 interface CodeEditorProps {
+  projectId: string;
+  cacheKey: string;
   filePath: string;
   initialContent: string;
   language: string;
@@ -77,8 +88,8 @@ interface CodeEditorProps {
   /** H4: 当前配色主题 id，决定编辑器使用哪套高亮主题 */
   theme?: string;
   jumpToRange?: { filePath: string; startLine: number; endLine: number; nonce: number } | null;
-  onContentChange: (newContent: string) => void;
-  onSave: (latestContent?: string) => void;
+  onContentChange: (newContent: string, projectId: string, filePath: string) => void;
+  onSave: (latestContent?: string, projectId?: string, filePath?: string) => void;
   onExplainSelection: (snippet: string, startLine: number, endLine: number) => void;
   onAskSelection?: (snippet: string, startLine: number, endLine: number) => void;
   onMarkConfusion: (snippet: string, startLine: number, endLine: number, category: string) => void;
@@ -86,6 +97,8 @@ interface CodeEditorProps {
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
+  projectId,
+  cacheKey,
   filePath,
   initialContent,
   language,
@@ -103,7 +116,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const activePathRef = useRef<string>(filePath);
+  const activePathRef = useRef<string>(cacheKey);
   const onSaveRef = useRef(onSave);
   const onContentChangeRef = useRef(onContentChange);
   const toastTimerRef = useRef<number | null>(null);
@@ -117,7 +130,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   }, [onContentChange]);
 
   const [forceFullEditMap, setForceFullEditMap] = useState<Record<string, boolean>>({});
-  const isLargeFile = initialContent.length > LARGE_FILE_BYTE_THRESHOLD;
+  const initialContentBytes = new TextEncoder().encode(initialContent).byteLength;
+  const isLargeFile = initialContentBytes > LARGE_FILE_BYTE_THRESHOLD;
   const isReadOnlyLargeMode = isLargeFile && !forceFullEditMap[filePath];
 
   const [selection, setSelection] = useState<{
@@ -236,7 +250,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         key: 'Mod-s',
         run: (view) => {
           const currentText = view.state.doc.toString();
-          onSaveRef.current(currentText);
+          onSaveRef.current(currentText, projectId, filePath);
           setSaveToast(true);
           if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
           toastTimerRef.current = window.setTimeout(() => setSaveToast(false), 2000);
@@ -247,7 +261,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
 
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged) {
-        onContentChangeRef.current(update.state.doc.toString());
+        onContentChangeRef.current(update.state.doc.toString(), projectId, filePath);
       }
 
       if (update.selectionSet || update.docChanged) {
@@ -329,7 +343,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     if (!editorRef.current) return;
 
     const configKey = `${language}:${isReadOnlyLargeMode}:${fontSize}:${fontFamily}:${wordWrap}:${theme}`;
-    const cached = editorStateCache.get(filePath);
+    const cached = editorStateCache.get(cacheKey);
+    const cacheEpochAtMount = projectCacheEpoch.get(projectId) || 0;
     const initialState =
       cached && cached.configKey === configKey
         ? cached.state
@@ -343,7 +358,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       parent: editorRef.current,
     });
     viewRef.current = view;
-    activePathRef.current = filePath;
+    activePathRef.current = cacheKey;
 
     if (cached) {
       requestAnimationFrame(() => {
@@ -355,12 +370,14 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     return () => {
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       if (viewRef.current) {
-        editorStateCache.set(activePathRef.current, {
-          state: viewRef.current.state,
-          scrollTop: viewRef.current.scrollDOM.scrollTop,
-          scrollLeft: viewRef.current.scrollDOM.scrollLeft,
-          configKey,
-        });
+        if ((projectCacheEpoch.get(projectId) || 0) === cacheEpochAtMount) {
+          editorStateCache.set(activePathRef.current, {
+            state: viewRef.current.state,
+            scrollTop: viewRef.current.scrollDOM.scrollTop,
+            scrollLeft: viewRef.current.scrollDOM.scrollLeft,
+            configKey,
+          });
+        }
         viewRef.current.destroy();
         viewRef.current = null;
       }
@@ -385,11 +402,11 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       });
     }
 
-    activePathRef.current = filePath;
+    activePathRef.current = cacheKey;
     setSelection(null);
     setShowConfusionModal(false);
 
-    const existing = editorStateCache.get(filePath);
+    const existing = editorStateCache.get(cacheKey);
     if (existing && existing.configKey === configKey) {
       view.setState(existing.state);
       requestAnimationFrame(() => {
@@ -407,7 +424,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         extensions: buildExtensions(language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme),
       });
       view.setState(nextState);
-      editorStateCache.set(filePath, {
+      editorStateCache.set(cacheKey, {
         state: nextState,
         scrollTop: existing?.scrollTop || 0,
         scrollLeft: existing?.scrollLeft || 0,
@@ -422,7 +439,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         });
       }
     }
-  }, [filePath, language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme]);
+  }, [cacheKey, filePath, language, isReadOnlyLargeMode, fontSize, fontFamily, wordWrap, theme]);
 
   // Support jumping to and highlighting a citation line range with line pulse fade
   useEffect(() => {
@@ -475,7 +492,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <AlertTriangle size={14} />
             <span>
-              文件较大 ({(initialContent.length / (1024 * 1024)).toFixed(2)} MB)，已自动以只读模式打开并关闭实时语法分析以保证流畅，仍可选择片段解读。
+              文件较大 ({(initialContentBytes / (1024 * 1024)).toFixed(2)} MB)，已自动以只读模式打开并关闭实时语法分析以保证流畅，仍可选择片段解读。
             </span>
           </div>
           <button

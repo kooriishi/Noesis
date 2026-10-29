@@ -17,6 +17,7 @@ export interface FileContentPayload {
 }
 
 export interface TabItem {
+  projectId: string;
   path: string;
   name: string;
   content: string;
@@ -538,4 +539,3 @@ export interface FeedbackStats {
   too_generic_rate: number;
   wrong_rate: number;
 }
-
